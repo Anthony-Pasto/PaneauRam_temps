@@ -1,13 +1,14 @@
 #include "Panneau.h"
-#include "Pid.h"
 #include "Mqtt.h"
 #include "Keyboard.h"
 #include "PidLog.h"
+#include "RunPID.h"
+#include "RunMqtt.h"
 
 #include <chrono>
 #include <cstdio>
+#include <mutex>
 #include <string>
-#include <thread>
 
 static void effacerEcran()
 {
@@ -71,11 +72,6 @@ static const std::string TOPIC_COURANT[8] = {
     "RAM/POWERMETER/ETATS/Ib",
     "", "", "", "", "", ""};
 
-/*static const std::string TOPIC_PID_P = "";
-static const std::string TOPIC_PID_I = "";
-static const std::string TOPIC_PID_D = "";
-static const std::string TOPIC_PID_DEMANDE = "";*/
-
 static void envoyerSiTopic(Mqtt &mqtt,
                            const std::string &topic,
                            double valeur)
@@ -88,14 +84,9 @@ static void envoyerSiTopic(Mqtt &mqtt,
 
 static void envoyerLecture(Mqtt &mqtt,
                            const PanelReading &lecture,
-                           const Pid &pid,
-                           double consigneGros,
                            double consignePetit,
-                           double consigneTempGros,
-                           double consigneTempPetit,
-                           double ouvertureValveGros)
+                           double consigneTempPetit)
 {
-
     envoyerSiTopic(mqtt, TOPIC_CONSIGNE_PETIT, consignePetit);
     envoyerSiTopic(mqtt, TOPIC_CONSIGNE_TEMP_PETIT, consigneTempPetit);
     envoyerSiTopic(mqtt, TOPIC_NIVEAU_GROS, lecture.niveauGrosBassin);
@@ -118,24 +109,13 @@ static void envoyerLecture(Mqtt &mqtt,
 
     mqtt.envoyer(TOPIC_DEBORDEMENT_PETIT,
                  lecture.debordementPetitBassin ? "ON" : "OFF");
-
-    /*envoyerSiTopic(mqtt, TOPIC_PID_P, pid.termP());
-    envoyerSiTopic(mqtt, TOPIC_PID_I, pid.termI());
-    envoyerSiTopic(mqtt, TOPIC_PID_D, pid.termD());
-    envoyerSiTopic(mqtt, TOPIC_PID_DEMANDE, pid.requested());*/
-
-    (void)ouvertureValveGros;
 }
 
 int main()
 {
-    bool modeAutomatique = false;
+    RunPID::Reglages reglages;
+    
     bool pompeEnMarche = false;
-    double consigneGros = 50.0;
-    double consignePetit = 50.0;
-    double consigneTempGros = 30.0;
-    double consigneTempPetit = 30.0;
-    bool temperaturePetitControlee = false;
 
     Mqtt mqtt;
     if (!mqtt.connecter("172.17.15.112", 1883))
@@ -145,33 +125,56 @@ int main()
     }
 
     Panel panneau;
-    if (!panneau.open("/tmp/ttyRAM"))
+    if (!panneau.open("/dev/pts/2"))//"/tmp/ttyRAM"
     {
         printf("Erreur : %s\n", panneau.lastError());
         mqtt.deconnecter();
         return 1;
     }
-Pid pidGros(2.5, 0.23, 1.2, 0.0, 100.0);
-Pid pidPetit(1.1, 0.17, 0.5, 0.0, 100.0);
-Pid pidTempPetit(18.0, 0.25, 5.0, -100.0, 100.0);
 
     double ouvertureEauChaude = 0.0;
     double ouvertureEauFroide = 0.0;
     double ouvertureGrandManuelle = 0.0;
     double ouverturePetitManuelle = 0.0;
 
-    pidGros.setAntiWindup(Pid::AntiWindup::ConditionalIntegration);
-    pidPetit.setAntiWindup(Pid::AntiWindup::ConditionalIntegration);
-    pidTempPetit.setAntiWindup(Pid::AntiWindup::ConditionalIntegration);
-    pidGros.reset();
-    pidPetit.reset();
+    std::mutex mutexPanneau;
+    RunPID runPIDThread(panneau, mutexPanneau);
+    RunMqtt reglagesMqtt(panneau, mutexPanneau);
+    
+    auto passerEnManuel = [&] {
+        reglages.automatique = false;
+        runPIDThread.configurer(reglages);
+    };
+    auto fermerSorties = [&](bool arreterPompe) {
+        std::lock_guard<std::mutex> verrou(mutexPanneau);
+        bool ok = !arreterPompe || panneau.setPump(false);
+        ok = panneau.setHotWater(false) && ok;
+        ok = panneau.setColdWater(false) && ok;
+        ok = panneau.setValve(Valve::LargeTank, 0.0) && ok;
+        ok = panneau.setValve(Valve::SmallTank, 0.0) && ok;
+        ok = panneau.setValve(Valve::HotWater, 0.0) && ok;
+        ok = panneau.setValve(Valve::ColdWater, 0.0) && ok;
+        ouvertureGrandManuelle = 0.0;
+        ouverturePetitManuelle = 0.0;
+        ouvertureEauChaude = 0.0;
+        ouvertureEauFroide = 0.0;
+        if (!ok)
+            std::fprintf(stderr, "Erreur de fermeture du panneau : %s\n", panneau.lastError());
+        return ok;
+    };
+
+    if (!runPIDThread.start(true))
+    {
+        fermerSorties(true);
+        return 1;
+    }
 
     Keyboard clavier;
+
     enum class Cible
     {
         NiveauGros,
         NiveauPetit,
-        TempGros,
         TempPetit
     };
     Cible cible = Cible::NiveauGros;
@@ -185,7 +188,10 @@ Pid pidTempPetit(18.0, 0.25, 5.0, -100.0, 100.0);
     ValveManuelle valveManuelle = ValveManuelle::Grand;
     std::string saisie;
 
-    auto dernierCalcul = std::chrono::steady_clock::now();
+    using Horloge = std::chrono::steady_clock;
+    auto prochainAffichage = Horloge::now();
+    bool debordementTraite = false;
+    std::string erreurPanneau;
 
     std::printf("\033[?25l");
     effacerEcran();
@@ -198,31 +204,57 @@ Pid pidTempPetit(18.0, 0.25, 5.0, -100.0, 100.0);
 
     while (true)
     {
-        if (clavier.kbhit(100))
+        const char touche = clavier.kbhit(100) ? clavier.getch() : '\0';
+        if (touche == 'q' || touche == 'Q')
+            break;
+
+        const RunPID::Resultat resultat = runPIDThread.getResultat();
+        if (!resultat.erreur.empty())
         {
-            char touche = clavier.getch();
+            erreurPanneau = resultat.erreur;
+            break;
+        }
 
-            if (touche == 'q' || touche == 'Q')
-                break;
+        const PanelReading& lecture = resultat.lecture;
+        const bool debordement = resultat.arretDebordement;
+        if (debordement)
+        {
+            if (!debordementTraite)
+            {
+                passerEnManuel();
+                pompeEnMarche = false;
+                debordementTraite = fermerSorties(true);
+                envoyerSiTopic(mqtt, TOPIC_POMPE, 0.0);
+            }
+            if (debordementTraite && !lecture.debordementGrosBassin && !lecture.debordementPetitBassin)
+                runPIDThread.confirmerArretDebordement();
+        }
+        else
+        {
+            debordementTraite = false;
+        }
 
-            if (!modeAutomatique && touche == '1')
+        if (touche != '\0' && !debordement && resultat.disponible)
+        {
+            if (!reglages.automatique && touche == '1')
             {
                 valveManuelle = ValveManuelle::Grand;
             }
-            else if (!modeAutomatique && touche == '2')
+            else if (!reglages.automatique && touche == '2')
             {
                 valveManuelle = ValveManuelle::Petit;
             }
-            else if (!modeAutomatique && touche == '3')
+            else if (!reglages.automatique && touche == '3')
             {
                 valveManuelle = ValveManuelle::Chaude;
             }
-            else if (!modeAutomatique && touche == '4')
+            else if (!reglages.automatique && touche == '4')
             {
                 valveManuelle = ValveManuelle::Froide;
             }
-            else if (!modeAutomatique && (touche == '+' || touche == '='))
+            else if (!reglages.automatique && (touche == '+' || touche == '='))
             {
+                std::lock_guard<std::mutex> verrou(mutexPanneau);
                 if (valveManuelle == ValveManuelle::Grand)
                 {
                     ouvertureGrandManuelle = bornerPourcentage(ouvertureGrandManuelle + 10.0);
@@ -244,8 +276,9 @@ Pid pidTempPetit(18.0, 0.25, 5.0, -100.0, 100.0);
                     panneau.setValve(Valve::ColdWater, ouvertureEauFroide);
                 }
             }
-            else if (!modeAutomatique && touche == '-')
+            else if (!reglages.automatique && touche == '-')
             {
+                std::lock_guard<std::mutex> verrou(mutexPanneau);
                 if (valveManuelle == ValveManuelle::Grand)
                 {
                     ouvertureGrandManuelle = bornerPourcentage(ouvertureGrandManuelle - 10.0);
@@ -279,10 +312,8 @@ Pid pidTempPetit(18.0, 0.25, 5.0, -100.0, 100.0);
             }
             else if (touche == 't' || touche == 'T')
             {
-                temperaturePetitControlee = !temperaturePetitControlee;
-                pidTempPetit.reset();
-                pidTempPetit.setAntiWindup(Pid::AntiWindup::ConditionalIntegration);
-                dernierCalcul = std::chrono::steady_clock::now();
+                reglages.temperatureActive = !reglages.temperatureActive;
+                runPIDThread.configurer(reglages);
                 saisie.clear();
             }
             else if (touche == 'u' || touche == 'U')
@@ -313,73 +344,57 @@ Pid pidTempPetit(18.0, 0.25, 5.0, -100.0, 100.0);
                     switch (cible)
                     {
                     case Cible::NiveauGros:
-                        consigneGros = valeur;
+                        reglages.consigneGros = valeur;
                         break;
                     case Cible::NiveauPetit:
-                        consignePetit = valeur;
-                        break;
-                    case Cible::TempGros:
-                        consigneTempGros = valeur;
+                        reglages.consignePetit = valeur;
                         break;
                     case Cible::TempPetit:
-                        consigneTempPetit = valeur;
+                        reglages.consigneTemperature = valeur;
                         break;
                     }
 
+                    runPIDThread.configurer(reglages);
                     saisie.clear();
                 }
             }
             else if (touche == 'a' || touche == 'A')
             {
-                modeAutomatique = true;
-                pidGros.reset();
-                pidPetit.reset();
-                pidTempPetit.reset();
-                dernierCalcul = std::chrono::steady_clock::now();
+                reglages.automatique = true;
+                runPIDThread.configurer(reglages, true);
             }
             else if (touche == 'm' || touche == 'M')
             {
-                modeAutomatique = false;
-                panneau.setValve(Valve::HotWater, 0.0);
-                panneau.setValve(Valve::ColdWater, 0.0);
-                panneau.setHotWater(false);
-                panneau.setColdWater(false);
-                ouvertureEauChaude = 0.0;
-                ouvertureEauFroide = 0.0;
-                ouvertureGrandManuelle = 0.0;
-                ouverturePetitManuelle = 0.0;
-                panneau.setValve(Valve::LargeTank, 0.0);
-                panneau.setValve(Valve::SmallTank, 0.0);
+                passerEnManuel();
+                fermerSorties(false);
             }
             else if (touche == 'p' || touche == 'P')
             {
                 pompeEnMarche = !pompeEnMarche;
-                panneau.setPump(pompeEnMarche);
+                {
+                    std::lock_guard<std::mutex> verrou(mutexPanneau);
+                    panneau.setPump(pompeEnMarche);
+                }
                 envoyerSiTopic(mqtt, TOPIC_POMPE,
                                pompeEnMarche ? 1.0 : 0.0);
             }
             else if (touche == 'o' || touche == 'O')
             {
-                modeAutomatique = false;
+                passerEnManuel();
                 pompeEnMarche = false;
-                panneau.setPump(false);
-                panneau.setValve(Valve::LargeTank, 0.0);
-                panneau.setValve(Valve::SmallTank, 0.0);
-                panneau.setValve(Valve::HotWater, 0.0);
-                panneau.setValve(Valve::ColdWater, 0.0);
-                ouvertureEauChaude = 0.0;
-                ouvertureEauFroide = 0.0;
+                fermerSorties(true);
                 envoyerSiTopic(mqtt, TOPIC_POMPE, 0.0);
             }
             else if (touche == 'l' || touche == 'L')
             {
                 // Ouverture manuelle des valves
-                modeAutomatique = false;
+                passerEnManuel();
                 double ouverture = 0.0;
                 printf("Ouverture manuelle (0-100) : ");
                 if (scanf("%lf", &ouverture) == 1)
                 {
                     ouverture = bornerPourcentage(ouverture);
+                    std::lock_guard<std::mutex> verrou(mutexPanneau);
                     panneau.setValve(Valve::LargeTank, ouverture);
                     ouvertureGrandManuelle = ouverture;
                 }
@@ -390,12 +405,13 @@ Pid pidTempPetit(18.0, 0.25, 5.0, -100.0, 100.0);
             else if (touche == 'j' || touche == 'J')
             {
                 // Ouverture manuelle des valves
-                modeAutomatique = false;
+                passerEnManuel();
                 double ouverture = 0.0;
                 printf("Ouverture manuelle (0-100) : ");
                 if (scanf("%lf", &ouverture) == 1)
                 {
                     ouverture = bornerPourcentage(ouverture);
+                    std::lock_guard<std::mutex> verrou(mutexPanneau);
                     panneau.setValve(Valve::SmallTank, ouverture);
                     ouverturePetitManuelle = ouverture;
                 }
@@ -403,15 +419,17 @@ Pid pidTempPetit(18.0, 0.25, 5.0, -100.0, 100.0);
                 getchar(); // Pour consommer le '\n' restant
                 getchar();
             }
-            else if (!modeAutomatique && (touche == 'h' || touche == 'H'))
+            else if (!reglages.automatique && (touche == 'h' || touche == 'H'))
             {
+                std::lock_guard<std::mutex> verrou(mutexPanneau);
                 valveManuelle = ValveManuelle::Chaude;
                 ouvertureEauChaude = (ouvertureEauChaude > 0.0) ? 0.0 : 100.0;
                 panneau.setValve(Valve::HotWater, ouvertureEauChaude);
                 panneau.setHotWater(ouvertureEauChaude > 0.0);
             }
-            else if (!modeAutomatique && (touche == 'f' || touche == 'F'))
+            else if (!reglages.automatique && (touche == 'f' || touche == 'F'))
             {
+                std::lock_guard<std::mutex> verrou(mutexPanneau);
                 valveManuelle = ValveManuelle::Froide;
                 ouvertureEauFroide = (ouvertureEauFroide > 0.0) ? 0.0 : 100.0;
                 panneau.setValve(Valve::ColdWater, ouvertureEauFroide);
@@ -419,100 +437,43 @@ Pid pidTempPetit(18.0, 0.25, 5.0, -100.0, 100.0);
             }
         }
 
-        PanelReading lecture;
-
-        if (!panneau.read(lecture))
+        const auto maintenant = Horloge::now();
+        if (maintenant < prochainAffichage)
+            continue;
+        prochainAffichage = maintenant + std::chrono::milliseconds(100);
+#
+        if (!resultat.disponible)
         {
             effacerEcran();
-            std::printf("Erreur panneau : %s\n", panneau.lastError());
-            panneau.setValve(Valve::LargeTank, 0.0);
-            panneau.setValve(Valve::SmallTank, 0.0);
-            panneau.setPump(false);
-            pompeEnMarche = false;
-            envoyerSiTopic(mqtt, TOPIC_POMPE, 0.0);
-
-            std::printf("Erreur panneau : %s\n", panneau.lastError());
-            break;
+            std::puts("En attente de la première lecture du panneau...");
+            std::fflush(stdout);
+            continue;
         }
 
-        if (lecture.debordementGrosBassin || lecture.debordementPetitBassin)
+        const double ouvertureGros = reglages.automatique ? resultat.ouvertureGros : ouvertureGrandManuelle;
+        const double ouverturePetit = reglages.automatique ? resultat.ouverturePetit : ouverturePetitManuelle;
+        if (reglages.automatique)
         {
-            modeAutomatique = false;
-            pompeEnMarche = false;
-            panneau.setPump(false);
-            panneau.setValve(Valve::LargeTank, 0.0);
-            panneau.setValve(Valve::SmallTank, 0.0);
-            panneau.setValve(Valve::HotWater, 0.0);
-            panneau.setValve(Valve::ColdWater, 0.0);
-            ouvertureEauChaude = 0.0;
-            ouvertureEauFroide = 0.0;
-            envoyerSiTopic(mqtt, TOPIC_POMPE, 0.0);
+            ouvertureEauChaude = resultat.ouvertureChaude;
+            ouvertureEauFroide = resultat.ouvertureFroide;
         }
 
-        double ouvertureGros = 0.0;
-        double ouverturePetit = 0.0;
-
-        if (modeAutomatique)
-        {
-            auto maintenant = std::chrono::steady_clock::now();
-            double dt = std::chrono::duration<double>(maintenant - dernierCalcul).count();
-            if (dt <= 0.0)
-                dt = 0.001;
-            if (dt > 2.0)
-                dt = 2.0;
-            dernierCalcul = maintenant;
-
-            ouvertureGros = pidGros.compute(consigneGros,
-                                            lecture.niveauGrosBassin, dt);
-
-            // Le PID de niveau reste toujours actif dans les deux modes.
-            ouverturePetit = pidPetit.compute(consignePetit,
-                                              lecture.niveauPetitBassin, dt);
-
-            if (temperaturePetitControlee)
-            {
-                double commandeTemperature = pidTempPetit.compute(
-                    consigneTempPetit,
-                    lecture.temperaturePetitBassin,
-                    dt);
-
-                // Les deux valves proportionnelles peuvent être ouvertes ensemble.
-                ouvertureEauChaude = bornerPourcentage(50.0 + commandeTemperature / 2.0);
-                ouvertureEauFroide = bornerPourcentage(50.0 - commandeTemperature / 2.0);
-            }
-            else
-            {
-                ouvertureEauChaude = 0.0;
-                ouvertureEauFroide = 0.0;
-            }
-
-            panneau.setValve(Valve::LargeTank, ouvertureGros);
-            panneau.setValve(Valve::SmallTank, ouverturePetit);
-            panneau.setValve(Valve::HotWater, ouvertureEauChaude);
-            panneau.setValve(Valve::ColdWater, ouvertureEauFroide);
-
-            panneau.setHotWater(ouvertureEauChaude > 0.0);
-            panneau.setColdWater(ouvertureEauFroide > 0.0);
-        }
-
-        envoyerLecture(mqtt, lecture, pidGros,
-                       consigneGros, consignePetit,
-                       consigneTempGros, consigneTempPetit, ouvertureGros);
+        envoyerLecture(mqtt, lecture, reglages.consignePetit, reglages.consigneTemperature);
 
         pidLog.enregistrer(
             lecture.niveauGrosBassin,
-            consigneGros,
+            reglages.consigneGros,
             lecture.niveauPetitBassin,
-            consignePetit,
+            reglages.consignePetit,
             lecture.temperaturePetitBassin,
-            consigneTempPetit,
+            reglages.consigneTemperature,
             ouvertureGros,
             ouverturePetit,
             ouvertureEauChaude,
             ouvertureEauFroide,
-            pidGros.termP(), pidGros.termI(), pidGros.termD(),
-            pidPetit.termP(), pidPetit.termI(), pidPetit.termD(),
-            pidTempPetit.termP(), pidTempPetit.termI(), pidTempPetit.termD());
+            resultat.gros.p, resultat.gros.i, resultat.gros.d,
+            resultat.petit.p, resultat.petit.i, resultat.petit.d,
+            resultat.temperature.p, resultat.temperature.i, resultat.temperature.d);
 
         effacerEcran();
         // fait par ai
@@ -521,30 +482,30 @@ Pid pidTempPetit(18.0, 0.25, 5.0, -100.0, 100.0);
         std::printf("\033[1;36m+============================================================+\033[0m\n");
 
         std::printf(" MODE : \033[1;%sm%-12s\033[0m",
-                    modeAutomatique ? "32" : "33",
-                    modeAutomatique ? "AUTOMATIQUE" : "MANUEL");
+                    reglages.automatique ? "32" : "33",
+                    reglages.automatique ? "AUTOMATIQUE" : "MANUEL");
         std::printf(" POMPE : \033[1;%sm%-3s\033[0m\n",
                     pompeEnMarche ? "32" : "31",
                     pompeEnMarche ? "ON" : "OFF");
 
         std::printf(" TEMPERATURE : \033[1;%sm%-3s\033[0m",
-                    temperaturePetitControlee ? "32" : "31",
-                    temperaturePetitControlee ? "ON" : "OFF");
+                    reglages.temperatureActive ? "32" : "31",
+                    reglages.temperatureActive ? "ON" : "OFF");
         std::printf(" DEBORDEMENT : ");
-        if (lecture.debordementGrosBassin || lecture.debordementPetitBassin)
+        if (debordement)
             std::printf("\033[1;31mALERTE\033[0m\n");
         else
             std::printf("\033[1;32mNORMAL\033[0m\n");
 
         std::printf("\n--- NIVEAUX ET CONSIGNES ----------------------------------\n");
-        afficherBarre("Gros bassin", lecture.niveauGrosBassin, consigneGros);
-        afficherBarre("Petit bassin", lecture.niveauPetitBassin, consignePetit);
+        afficherBarre("Gros bassin", lecture.niveauGrosBassin, reglages.consigneGros);
+        afficherBarre("Petit bassin", lecture.niveauPetitBassin, reglages.consignePetit);
         std::printf("     Grand valve = %3.0f %%   |   Petit valve = %3.0f %%\n",
                     ouvertureGros, ouverturePetit);
 
         std::printf("\n--- TEMPERATURE PETIT BASSIN -----------------------------\n");
         std::printf("  Actuelle : %3.0f C   Cible : %3.0f C\n",
-                    lecture.temperaturePetitBassin, consigneTempPetit);
+                    lecture.temperaturePetitBassin, reglages.consigneTemperature);
         std::printf("  Eau chaude : %3.0f %%   Eau froide : %3.0f %%\n",
                     ouvertureEauChaude, ouvertureEauFroide);
 
@@ -552,8 +513,6 @@ Pid pidTempPetit(18.0, 0.25, 5.0, -100.0, 100.0);
         const char *nomCible = "NIV. GROS";
         if (cible == Cible::NiveauPetit)
             nomCible = "NIV. PETIT";
-        if (cible == Cible::TempGros)
-            nomCible = "TEMP GROS";
         if (cible == Cible::TempPetit)
             nomCible = "TEMP PETIT";
         std::printf("  Cible : %-12s Valeur saisie : %s\n",
@@ -584,21 +543,18 @@ Pid pidTempPetit(18.0, 0.25, 5.0, -100.0, 100.0);
         std::printf("\033[1;36m+============================================================+\033[0m\n");
         // fait par ai
         std::fflush(stdout);
-
-        std::this_thread::sleep_for(std::chrono::milliseconds(200));
     }
 
-    panneau.setValve(Valve::LargeTank, 0.0);
-    panneau.setValve(Valve::SmallTank, 0.0);
-    panneau.setPump(false);
-    panneau.setColdWater(false); // Fermer eau froide
-    panneau.setHotWater(false);  // Fermer eau chaude
+    runPIDThread.stop();
+    runPIDThread.join();
+    const bool sortiesFermees = fermerSorties(true);
     envoyerSiTopic(mqtt, TOPIC_POMPE, 0.0);
     panneau.close();
     mqtt.deconnecter();
-    // effacerEcran();
-    // std::printf("\033[?25h");
 
+    std::printf("\033[?25h");
     std::fflush(stdout);
-    return 0;
+    if (!erreurPanneau.empty())
+        std::fprintf(stderr, "Erreur RunPID : %s\n", erreurPanneau.c_str());
+    return erreurPanneau.empty() && sortiesFermees ? 0 : 1;
 }

@@ -16,45 +16,45 @@ Thread::~Thread() {
     join();
 }
 
-bool Thread::start() {
+bool Thread::start(bool autoriserRepli) {
+    if (demarre) {
+        return true;
+    }
+
     pthread_attr_t attributs;
-    struct sched_param parametres;
-
-    pthread_attr_init(&attributs);
-    memset(&parametres, 0, sizeof(parametres));   // initialisée dans TOUS les cas
-
-    if (politique != SCHED_OTHER) {
-        // sans EXPLICIT_SCHED, le fil hériterait de la politique de son créateur
-        pthread_attr_setinheritsched(&attributs, PTHREAD_EXPLICIT_SCHED);
-        pthread_attr_setschedpolicy(&attributs, politique);
-        parametres.sched_priority = priorite;
-        pthread_attr_setschedparam(&attributs, &parametres);
-    }
-    if (coeur >= 0) {
-        cpu_set_t ensemble;
-        CPU_ZERO(&ensemble);
-        CPU_SET(coeur, &ensemble);
-        pthread_attr_setaffinity_np(&attributs, sizeof(ensemble), &ensemble);
-    }
+    struct sched_param parametres{};
 
     enMarche = true;
-    int code = -1;
-    /* TODO 2 : créer le fil d'exécution avec pthread_create (man pthread_create).
-       Le fil exécute handler, qui doit recevoir this en argument; les attributs
-       sont prêts. Rangez le code de retour dans la variable code, déclarée juste
-       au-dessus. Donc : code = pthread_create(...). */
-       code = pthread_create(&fil, &attributs, handler, this);
+    int code = pthread_attr_init(&attributs);
+    if (code == 0) {
+        if (politique != SCHED_OTHER) {
+            code = pthread_attr_setinheritsched(&attributs, PTHREAD_EXPLICIT_SCHED);
+            if (code == 0)
+                code = pthread_attr_setschedpolicy(&attributs, politique);
+            parametres.sched_priority = priorite;
+            if (code == 0)
+                code = pthread_attr_setschedparam(&attributs, &parametres);
+        }
+        if (code == 0 && coeur >= 0) {
+            cpu_set_t ensemble;
+            CPU_ZERO(&ensemble);
+            CPU_SET(coeur, &ensemble);
+            code = pthread_attr_setaffinity_np(&attributs, sizeof(ensemble), &ensemble);
+        }
+        if (code == 0)
+            code = pthread_create(&fil, &attributs, handler, this);
+        pthread_attr_destroy(&attributs);
+    }
 
-    pthread_attr_destroy(&attributs);
+    if (code != 0 && autoriserRepli) {
+        fprintf(stderr, "%s : réglages du thread refusés (%s), essai sans priorité ni cœur imposé.\n",
+                nom, strerror(code));
+        code = pthread_create(&fil, nullptr, handler, this);
+    }
 
     if (code != 0) {
         enMarche = false;
-        if (code == -1) {
-            fprintf(stderr, "%s : le fil n'a pas été créé : le TODO 2 est à remplir.\n", nom);
-        } else {
-            fprintf(stderr, "%s : démarrage refusé (code %d).", nom, code);
-            fprintf(stderr, " En temps réel, lancez le programme avec sudo.\n");
-        }
+        fprintf(stderr, "%s : démarrage refusé (%s).\n", nom, strerror(code));
         return false;
     }
     demarre = true;

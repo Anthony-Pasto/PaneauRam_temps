@@ -1,6 +1,7 @@
 // Thread.h : une tâche = une classe dérivée qui implante task().
 #pragma once
 
+#include <atomic>
 #include <pthread.h>
 
 class Thread {
@@ -15,13 +16,13 @@ public:
     Thread(const Thread&) = delete;
     Thread& operator=(const Thread&) = delete;
 
-    bool start();   // démarre la tâche; false si le système refuse (temps réel sans sudo)
+    bool start(bool autoriserRepli = false);
     void stop();    // demande la fin : enMarche tombe, la boucle de task() se termine
     void join();    // attend que la tâche soit terminée
 
 protected:
     virtual void task() = 0;          // la boucle de la tâche : while (enMarche) { ... }
-    volatile bool enMarche = false;   // écrit par stop() seulement; la boucle le lit
+    std::atomic<bool> enMarche{false};
 
 private:
     static void* handler(void* argument);   // le point d'entrée du fil; argument == this
