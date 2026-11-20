@@ -151,10 +151,9 @@ int main()
         mqtt.deconnecter();
         return 1;
     }
-
-    Pid pidGros(1.5, 0.15, 0.0, 0.0, 100.0);
-    Pid pidPetit(0.65, 0.075, 0.0, 0.0, 100.0);
-    Pid pidTempPetit(12.0, 4.8, 7.5, -100.0, 100.0);
+Pid pidGros(2.5, 0.23, 1.2, 0.0, 100.0);
+Pid pidPetit(1.1, 0.17, 0.5, 0.0, 100.0);
+Pid pidTempPetit(18.0, 0.25, 5.0, -100.0, 100.0);
 
     double ouvertureEauChaude = 0.0;
     double ouvertureEauFroide = 0.0;
@@ -586,7 +585,7 @@ int main()
         // fait par ai
         std::fflush(stdout);
 
-        std::this_thread::sleep_for(std::chrono::milliseconds(300));
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
     }
 
     panneau.setValve(Valve::LargeTank, 0.0);
