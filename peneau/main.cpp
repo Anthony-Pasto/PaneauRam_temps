@@ -2,6 +2,7 @@
 #include "Pid.h"
 #include "Mqtt.h"
 #include "Keyboard.h"
+#include "PidLog.h"
 
 #include <chrono>
 #include <cstdio>
@@ -23,7 +24,7 @@ static double bornerPourcentage(double valeur)
     return valeur;
 }
 
-static void afficherBarre(const char* titre, double valeur, double consigne)
+static void afficherBarre(const char *titre, double valeur, double consigne)
 {
     valeur = bornerPourcentage(valeur);
     consigne = bornerPourcentage(consigne);
@@ -151,16 +152,18 @@ int main()
         return 1;
     }
 
-    Pid pidGros(30.0, 12.0, 18.75, 0.0, 100.0);
-    Pid pidPetit(15.0, 6.0, 9.43, 0.0, 100.0);
+    Pid pidGros(1.5, 0.15, 0.0, 0.0, 100.0);
+    Pid pidPetit(0.65, 0.075, 0.0, 0.0, 100.0);
     Pid pidTempPetit(12.0, 4.8, 7.5, -100.0, 100.0);
-    pidTempPetit.setAntiWindup(Pid::AntiWindup::ConditionalIntegration);
+
     double ouvertureEauChaude = 0.0;
     double ouvertureEauFroide = 0.0;
     double ouvertureGrandManuelle = 0.0;
     double ouverturePetitManuelle = 0.0;
+
     pidGros.setAntiWindup(Pid::AntiWindup::ConditionalIntegration);
     pidPetit.setAntiWindup(Pid::AntiWindup::ConditionalIntegration);
+    pidTempPetit.setAntiWindup(Pid::AntiWindup::ConditionalIntegration);
     pidGros.reset();
     pidPetit.reset();
 
@@ -173,7 +176,13 @@ int main()
         TempPetit
     };
     Cible cible = Cible::NiveauGros;
-    enum class ValveManuelle { Grand, Petit, Chaude, Froide };
+    enum class ValveManuelle
+    {
+        Grand,
+        Petit,
+        Chaude,
+        Froide
+    };
     ValveManuelle valveManuelle = ValveManuelle::Grand;
     std::string saisie;
 
@@ -181,6 +190,12 @@ int main()
 
     std::printf("\033[?25l");
     effacerEcran();
+
+    PidLog pidLog;
+    if (!pidLog.isOpen())
+    {
+        printf("Attention : impossible de creer les trois fichiers PID CSV\n");
+    }
 
     while (true)
     {
@@ -191,43 +206,69 @@ int main()
             if (touche == 'q' || touche == 'Q')
                 break;
 
-            if (!modeAutomatique && touche == '1') {
+            if (!modeAutomatique && touche == '1')
+            {
                 valveManuelle = ValveManuelle::Grand;
-            } else if (!modeAutomatique && touche == '2') {
+            }
+            else if (!modeAutomatique && touche == '2')
+            {
                 valveManuelle = ValveManuelle::Petit;
-            } else if (!modeAutomatique && touche == '3') {
+            }
+            else if (!modeAutomatique && touche == '3')
+            {
                 valveManuelle = ValveManuelle::Chaude;
-            } else if (!modeAutomatique && touche == '4') {
+            }
+            else if (!modeAutomatique && touche == '4')
+            {
                 valveManuelle = ValveManuelle::Froide;
-            } else if (!modeAutomatique && (touche == '+' || touche == '=')) {
-                if (valveManuelle == ValveManuelle::Grand) {
+            }
+            else if (!modeAutomatique && (touche == '+' || touche == '='))
+            {
+                if (valveManuelle == ValveManuelle::Grand)
+                {
                     ouvertureGrandManuelle = bornerPourcentage(ouvertureGrandManuelle + 10.0);
                     panneau.setValve(Valve::LargeTank, ouvertureGrandManuelle);
-                } else if (valveManuelle == ValveManuelle::Petit) {
+                }
+                else if (valveManuelle == ValveManuelle::Petit)
+                {
                     ouverturePetitManuelle = bornerPourcentage(ouverturePetitManuelle + 10.0);
                     panneau.setValve(Valve::SmallTank, ouverturePetitManuelle);
-                } else if (valveManuelle == ValveManuelle::Chaude) {
+                }
+                else if (valveManuelle == ValveManuelle::Chaude)
+                {
                     ouvertureEauChaude = bornerPourcentage(ouvertureEauChaude + 10.0);
                     panneau.setValve(Valve::HotWater, ouvertureEauChaude);
-                } else {
+                }
+                else
+                {
                     ouvertureEauFroide = bornerPourcentage(ouvertureEauFroide + 10.0);
                     panneau.setValve(Valve::ColdWater, ouvertureEauFroide);
                 }
-            } else if (!modeAutomatique && touche == '-') {
-                if (valveManuelle == ValveManuelle::Grand) {
+            }
+            else if (!modeAutomatique && touche == '-')
+            {
+                if (valveManuelle == ValveManuelle::Grand)
+                {
                     ouvertureGrandManuelle = bornerPourcentage(ouvertureGrandManuelle - 10.0);
                     panneau.setValve(Valve::LargeTank, ouvertureGrandManuelle);
-                } else if (valveManuelle == ValveManuelle::Petit) {
+                }
+                else if (valveManuelle == ValveManuelle::Petit)
+                {
                     ouverturePetitManuelle = bornerPourcentage(ouverturePetitManuelle - 10.0);
                     panneau.setValve(Valve::SmallTank, ouverturePetitManuelle);
-                } else if (valveManuelle == ValveManuelle::Chaude) {
+                }
+                else if (valveManuelle == ValveManuelle::Chaude)
+                {
                     ouvertureEauChaude = bornerPourcentage(ouvertureEauChaude - 10.0);
                     panneau.setValve(Valve::HotWater, ouvertureEauChaude);
-                } else {
+                }
+                else
+                {
                     ouvertureEauFroide = bornerPourcentage(ouvertureEauFroide - 10.0);
                     panneau.setValve(Valve::ColdWater, ouvertureEauFroide);
                 }
-            } else if (touche == 'g' || touche == 'G')
+            }
+            else if (touche == 'g' || touche == 'G')
             {
                 cible = Cible::NiveauGros;
                 saisie.clear();
@@ -363,12 +404,15 @@ int main()
                 getchar(); // Pour consommer le '\n' restant
                 getchar();
             }
-            else if (!modeAutomatique && (touche == 'h' || touche == 'H')) {
+            else if (!modeAutomatique && (touche == 'h' || touche == 'H'))
+            {
                 valveManuelle = ValveManuelle::Chaude;
                 ouvertureEauChaude = (ouvertureEauChaude > 0.0) ? 0.0 : 100.0;
                 panneau.setValve(Valve::HotWater, ouvertureEauChaude);
                 panneau.setHotWater(ouvertureEauChaude > 0.0);
-            } else if (!modeAutomatique && (touche == 'f' || touche == 'F')) {
+            }
+            else if (!modeAutomatique && (touche == 'f' || touche == 'F'))
+            {
                 valveManuelle = ValveManuelle::Froide;
                 ouvertureEauFroide = (ouvertureEauFroide > 0.0) ? 0.0 : 100.0;
                 panneau.setValve(Valve::ColdWater, ouvertureEauFroide);
@@ -377,7 +421,7 @@ int main()
         }
 
         PanelReading lecture;
-   
+
         if (!panneau.read(lecture))
         {
             effacerEcran();
@@ -431,8 +475,7 @@ int main()
                 double commandeTemperature = pidTempPetit.compute(
                     consigneTempPetit,
                     lecture.temperaturePetitBassin,
-                    dt
-                );
+                    dt);
 
                 // Les deux valves proportionnelles peuvent être ouvertes ensemble.
                 ouvertureEauChaude = bornerPourcentage(50.0 + commandeTemperature / 2.0);
@@ -457,8 +500,23 @@ int main()
                        consigneGros, consignePetit,
                        consigneTempGros, consigneTempPetit, ouvertureGros);
 
+        pidLog.enregistrer(
+            lecture.niveauGrosBassin,
+            consigneGros,
+            lecture.niveauPetitBassin,
+            consignePetit,
+            lecture.temperaturePetitBassin,
+            consigneTempPetit,
+            ouvertureGros,
+            ouverturePetit,
+            ouvertureEauChaude,
+            ouvertureEauFroide,
+            pidGros.termP(), pidGros.termI(), pidGros.termD(),
+            pidPetit.termP(), pidPetit.termI(), pidPetit.termD(),
+            pidTempPetit.termP(), pidTempPetit.termI(), pidTempPetit.termD());
+
         effacerEcran();
-        //fait par ai 
+        // fait par ai
         std::printf("\033[1;36m+============================================================+\033[0m\n");
         std::printf("\033[1;36m|                 PANNEAU RAM - CONTROLE                     |\033[0m\n");
         std::printf("\033[1;36m+============================================================+\033[0m\n");
@@ -492,18 +550,24 @@ int main()
                     ouvertureEauChaude, ouvertureEauFroide);
 
         std::printf("\n--- COMMANDE ------------------------------------------------\n");
-        const char* nomCible = "NIV. GROS";
-        if (cible == Cible::NiveauPetit) nomCible = "NIV. PETIT";
-        if (cible == Cible::TempGros) nomCible = "TEMP GROS";
-        if (cible == Cible::TempPetit) nomCible = "TEMP PETIT";
+        const char *nomCible = "NIV. GROS";
+        if (cible == Cible::NiveauPetit)
+            nomCible = "NIV. PETIT";
+        if (cible == Cible::TempGros)
+            nomCible = "TEMP GROS";
+        if (cible == Cible::TempPetit)
+            nomCible = "TEMP PETIT";
         std::printf("  Cible : %-12s Valeur saisie : %s\n",
                     nomCible,
                     saisie.empty() ? "---" : saisie.c_str());
 
-        const char* nomValve = "GROS";
-        if (valveManuelle == ValveManuelle::Petit) nomValve = "PETIT";
-        if (valveManuelle == ValveManuelle::Chaude) nomValve = "EAU CHAUDE";
-        if (valveManuelle == ValveManuelle::Froide) nomValve = "EAU FROIDE";
+        const char *nomValve = "GROS";
+        if (valveManuelle == ValveManuelle::Petit)
+            nomValve = "PETIT";
+        if (valveManuelle == ValveManuelle::Chaude)
+            nomValve = "EAU CHAUDE";
+        if (valveManuelle == ValveManuelle::Froide)
+            nomValve = "EAU FROIDE";
 
         std::printf("  Valve manuelle : %-10s  [1 Gros] [2 Petit] [3 Chaude] [4 Froide]\n",
                     nomValve);
@@ -519,7 +583,7 @@ int main()
         std::printf("  P Pompe  |  H Chaude  |  F Froide  |  +/- Ouvrir/Fermer 10%%\n");
         std::printf("  O Arret complet  |  Q Quitter\n");
         std::printf("\033[1;36m+============================================================+\033[0m\n");
-// fait par ai
+        // fait par ai
         std::fflush(stdout);
 
         std::this_thread::sleep_for(std::chrono::milliseconds(300));
@@ -533,9 +597,9 @@ int main()
     envoyerSiTopic(mqtt, TOPIC_POMPE, 0.0);
     panneau.close();
     mqtt.deconnecter();
-    //effacerEcran();
-   // std::printf("\033[?25h");
-   
+    // effacerEcran();
+    // std::printf("\033[?25h");
+
     std::fflush(stdout);
     return 0;
 }
