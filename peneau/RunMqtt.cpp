@@ -4,9 +4,11 @@
 #include "Panneau.h"
 
 #include <chrono>
-#include <cstdio>
+#include <cmath>
+#include <cstdlib>
 #include <thread>
 #include <sstream>
+#include <utility>
 
 RunMqtt::RunMqtt(const RunPID &runPID, Mqtt &mqtt, Panel &panneau)
     : Thread("RunMqtt"), runPID(runPID), mqtt(mqtt), panneau(panneau)
@@ -35,76 +37,72 @@ void RunMqtt::task()
     {
         const auto prochainCycle = Horloge::now() + periode;
         Mqtt::Message message;
-        if (mqtt.recevoir(message))
+        for (int i = 0; i < 32 && enMarche && mqtt.recevoir(message); ++i)
         {
-            std::string valeur = message.contenu;
             std::istringstream topic(message.topic);
-            std::string RAM, DOMAIN, CMD, capteur;
+            std::string reseau, domaine, categorie, capteur;
+            if (!std::getline(topic, reseau, '/') ||
+                !std::getline(topic, domaine, '/') ||
+                !std::getline(topic, categorie, '/') ||
+                !std::getline(topic, capteur, '/') ||
+                topic.peek() != std::char_traits<char>::eof() ||
+                reseau != "RAM" || domaine != "PANNEAU" ||
+                (categorie != "CMD" && categorie != "ACK"))
+                continue;
 
-            std::getline(topic, RAM, '/');
-            std::getline(topic, DOMAIN, '/');
-            std::getline(topic, CMD, '/');
-            std::getline(topic, capteur, '/');
-            if (RAM != "RAM" || (CMD != "CMD" && CMD != "ACK"))
+            ValeurRecue MisesAJour::* champ = nullptr;
+            if (capteur == "ConsTmpPB" || capteur == "ConsTempPB")
+                champ = &MisesAJour::consigneTemperature;
+            else if (capteur == "Mode")
+                champ = &MisesAJour::mode;
+            else if (capteur == "Pompe")
+                champ = &MisesAJour::pompe;
+            else if (capteur == "ValveEC")
+                champ = &MisesAJour::valveEC;
+            else if (capteur == "ValveG" || capteur == "ValveGB")
+                champ = &MisesAJour::valveGB;
+            else if (capteur == "ValvePB")
+                champ = &MisesAJour::valvePB;
+            else if (capteur == "ValveEF")
+                champ = &MisesAJour::valveEF;
+            else if (capteur == "ValveEEC")
+                champ = &MisesAJour::valveEEC;
+            else if (capteur == "ConsNivGB")
+                champ = &MisesAJour::consigneGros;
+            else if (capteur == "ConsNivPB")
+                champ = &MisesAJour::consignePetit;
+            else if (capteur == "ValveEEF")
+                champ = &MisesAJour::valveEEF;
+            else if (capteur == "NivGB")
+                champ = &MisesAJour::nivGB;
+            else if (capteur == "NivPB")
+                champ = &MisesAJour::nivPB;
+            else if (capteur == "TmpGB")
+                champ = &MisesAJour::tmpGB;
+            else if (capteur == "TmpPB")
+                champ = &MisesAJour::tmpPB;
+            else if (capteur == "ALR_PB_OVF")
+                champ = &MisesAJour::alarmePetit;
+            else if (capteur == "ALR_GB_OVF")
+                champ = &MisesAJour::alarmeGros;
+
+            if (champ)
             {
-                break;
+                std::lock_guard<std::mutex> verrou(mutexConsignes);
+                auto& valeur = enAttente.*champ;
+                if (categorie == "ACK" && valeur.estCommande)
+                    continue;
+                valeur.contenu = message.contenu;
+                valeur.estCommande = categorie == "CMD";
+                valeur.recue = true;
+                misesAJourDisponibles = true;
             }
-            if (DOMAIN == "PANNEAU")
-            {
-                if (capteur == "NivGB")
-                {
-                    double gros = std::stod(valeur);
-                    // std::lock_guard<std::mutex> verrou(mutexConsignes);
-                    // consigneGros = gros;
-                }
-                else if (capteur == "NivPB")
-                {
-                    double petit = std::stod(valeur);
-                    // std::lock_guard<std::mutex> verrou(mutexConsignes);
-                    // consignePetit = petit;
-                }
-                else if (capteur == "TmpGB")
-                {
-                    double temperature = std::stod(valeur);
-                    // std::lock_guard<std::mutex> verrou(mutexConsignes);
-                    // consigneTemperature = temperature;
-                }
-                else if (capteur == "TmpPB")
-                {
-                    double temperature = std::stod(valeur);
-                    // std::lock_guard<std::mutex> verrou(mutexConsignes);
-                    // consigneTemperature = temperature;
-                }
-                else if (capteur == "ValveGB")
-                {
-                    double petit = std::stod(valeur);
-                    std::lock_guard<std::mutex> verrou(mutexConsignes); // a meui developper et pas forcement bon
-                    consignePetit = petit;
-                }
-                else if (capteur == "ConsTempPB")
-                {
-                    double temperature = std::stod(valeur);
-                    std::lock_guard<std::mutex> verrou(mutexConsignes);
-                    temperatureRecue = temperature;
-                    nouvelleConsigneTemperature = true;
-                }
-            }
-            // mqtt.envoyer("RAM/PANNEAU/CMD/test", message.contenu);
         }
+
         const auto resultat = runPID.getResultat();
         if (resultat.disponible)
         {
-            double petit;
-            double temperature;
-            {
-                std::lock_guard<std::mutex> verrou(mutexConsignes);
-                petit = consignePetit;
-                temperature = consigneTemperature;
-            }
-
             const PanelReading &lecture = resultat.lecture;
-            mqtt.envoyer("RAM/PANNEAU/CMD/ConsTmpPB", petit);
-            mqtt.envoyer("RAM/PANNEAU/CMD/ConsTempPB", temperature);
             mqtt.envoyer("RAM/PANNEAU/ETATS/NivGB", lecture.niveauGrosBassin);
             mqtt.envoyer("RAM/PANNEAU/ETATS/NivPB", lecture.niveauPetitBassin);
             mqtt.envoyer("RAM/PANNEAU/ETATS/TmpGB", lecture.temperatureGrosBassin);
@@ -126,13 +124,31 @@ void RunMqtt::task()
         std::this_thread::sleep_until(prochainCycle);
     }
 }
-bool RunMqtt::prendreConsigneTemperature(double& valeur)
+
+bool RunMqtt::prendreMisesAJour(MisesAJour& valeurs)
 {
     std::lock_guard<std::mutex> verrou(mutexConsignes);
-    if (!nouvelleConsigneTemperature)
+    if (!misesAJourDisponibles)
         return false;
 
-    valeur = temperatureRecue;
-    nouvelleConsigneTemperature = false;
+    valeurs = std::move(enAttente);
+    enAttente = MisesAJour{};
+    misesAJourDisponibles = false;
+    return true;
+}
+
+bool RunMqtt::ValeurRecue::lireConsigne(double& valeur) const
+{
+    if (!recue || !estCommande)
+        return false;
+
+    const char* texte = contenu.c_str();
+    char* fin = nullptr;
+    const double nombre = std::strtod(texte, &fin);
+    if (fin == texte || fin != texte + contenu.size() ||
+        !std::isfinite(nombre) || nombre < 0.0 || nombre > 100.0)
+        return false;
+
+    valeur = nombre;
     return true;
 }

@@ -184,14 +184,6 @@ int main(int argc, char* argv[])
             erreurPanneau = resultat.erreur;
             break;
         }
-double temperature;
-if (runMqttThread.prendreConsigneTemperature(temperature))
-{
-    reglages.consigneTemperature = temperature;
-    runPIDThread.configurer(reglages);
-    runMqttThread.configurerConsignes(reglages.consignePetit,
-                                     reglages.consigneTemperature);
-}
         const PanelReading& lecture = resultat.lecture;
         const bool debordement = resultat.arretDebordement;
         if (debordement)
@@ -209,6 +201,62 @@ if (runMqttThread.prendreConsigneTemperature(temperature))
         else
         {
             debordementTraite = false;
+        }
+
+        RunMqtt::MisesAJour valeurs;
+        if (runMqttThread.prendreMisesAJour(valeurs) && resultat.disponible && !debordement)
+        {
+            const bool gros = valeurs.consigneGros.lireConsigne(reglages.consigneGros);
+            const bool petit = valeurs.consignePetit.lireConsigne(reglages.consignePetit);
+            const bool temperature = valeurs.consigneTemperature.lireConsigne(reglages.consigneTemperature);
+            auto commandeEst = [](const RunMqtt::ValeurRecue& valeur, const char* texte) {
+                return valeur.recue && valeur.estCommande && valeur.contenu == texte;
+            };
+            const bool activerAuto = !reglages.automatique && commandeEst(valeurs.mode, "AUTO");
+            if (commandeEst(valeurs.mode, "MANUAL") || commandeEst(valeurs.mode, "MANUEL"))
+            {
+                passerEnManuel();
+                fermerSorties(false);
+            }
+            else if (activerAuto)
+            {
+                reglages.automatique = true;
+                runPIDThread.configurer(reglages, true);
+            }
+            else if (gros || petit || temperature)
+            {
+                runPIDThread.configurer(reglages);
+            }
+            if (gros || petit || temperature)
+                runMqttThread.configurerConsignes(reglages.consignePetit, reglages.consigneTemperature);
+
+            const bool pompeOn = commandeEst(valeurs.pompe, "ON") || commandeEst(valeurs.pompe, "1");
+            const bool pompeOff = commandeEst(valeurs.pompe, "OFF") || commandeEst(valeurs.pompe, "0");
+            if (pompeOn || pompeOff)
+            {
+                std::lock_guard<std::mutex> verrou(mutexPanneau);
+                if (panneau.setPump(pompeOn))
+                    pompeEnMarche = pompeOn;
+            }
+
+            if (!reglages.automatique)
+            {
+                std::lock_guard<std::mutex> verrou(mutexPanneau);
+                auto reglerValve = [&](const RunMqtt::ValeurRecue& valeur, Valve valve, double& ouverture) {
+                    double demande;
+                    if (valeur.lireConsigne(demande) && panneau.setValve(valve, demande))
+                        ouverture = demande;
+                };
+                reglerValve(valeurs.valveGB, Valve::LargeTank, ouvertureGrandManuelle);
+                reglerValve(valeurs.valvePB, Valve::SmallTank, ouverturePetitManuelle);
+                reglerValve(valeurs.valveEC, Valve::HotWater, ouvertureEauChaude);
+                reglerValve(valeurs.valveEF, Valve::ColdWater, ouvertureEauFroide);
+
+                if (commandeEst(valeurs.valveEEC, "ON") || commandeEst(valeurs.valveEEC, "OFF"))
+                    panneau.setHotWater(valeurs.valveEEC.contenu == "ON");
+                if (commandeEst(valeurs.valveEEF, "ON") || commandeEst(valeurs.valveEEF, "OFF"))
+                    panneau.setColdWater(valeurs.valveEEF.contenu == "ON");
+            }
         }
 
         if (touche != '\0' && !debordement && resultat.disponible)
