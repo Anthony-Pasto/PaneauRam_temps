@@ -133,6 +133,7 @@ void RunPID::task()
                 reglages.automatique = false;
             // Conserver une alarme même si elle disparaît entre deux lectures de main.
             cycle.arretDebordement = resultat.arretDebordement || debordement;
+            cycle.automatique = reglages.automatique;
             resultat = cycle;
         }
 

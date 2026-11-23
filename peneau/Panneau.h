@@ -81,7 +81,7 @@ struct PanelReading {
 
 class Panel {
 public:
-    Panel();
+    explicit Panel(int delaiReponseMs = 200);
 
     bool open(const char* cheminPort);
     void close();
@@ -104,6 +104,9 @@ public:
     // Les conversions, publiques pour les tests et l'affichage.
     double valveCurrent(Valve valve, double ouverturePourcent) const;   // % -> mA envoyés
     double valveFromReadback(Valve valve, double courantRelu) const;    // mA relus -> %
+    bool isPumpOn() const;
+    bool isHotWaterOn() const;
+    bool isColdWaterOn() const;
 
 private:
     bool sendCommand(const char* trame);
@@ -111,5 +114,10 @@ private:
     const char* errorDetail(int n, const char* reponse) const;
 
     SerialPort port;
+    const int delaiReponseMs;
     char erreur[160];
+
+    bool pompeEnMarche = false;
+    bool eauChaudeActive = false;
+    bool eauFroideActive = false;
 };

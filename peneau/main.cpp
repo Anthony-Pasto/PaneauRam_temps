@@ -7,6 +7,8 @@
 
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
+#include <climits>
 #include <mutex>
 #include <string>
 
@@ -46,73 +48,23 @@ static void afficherBarre(const char *titre, double valeur, double consigne)
     std::printf("] %3.0f%%  consigne %3.0f%%\n", valeur, consigne);
 }
 
-// Remplace ces chaînes par tes propres noms de topics avant utilisation.
-static const std::string TOPIC_CONSIGNE_PETIT = "RAM/PANNEAU/CMD/ConsTmpPB";
-static const std::string TOPIC_CONSIGNE_TEMP_PETIT = "RAM/PANNEAU/CMD/ConsTempPB";
-static const std::string TOPIC_NIVEAU_GROS = "RAM/PANNEAU/ETATS/NivGB";
-static const std::string TOPIC_NIVEAU_PETIT = "RAM/PANNEAU/ETATS/NivPB";
-static const std::string TOPIC_TEMP_GROS = "RAM/PANNEAU/ETATS/TmpGB";
-static const std::string TOPIC_TEMP_PETIT = "RAM/PANNEAU/ETATS/TmpPB";
-
-static const std::string TOPIC_VALVE_LARGE = "RAM/PANNEAU/ETATS/ValveGB";
-static const std::string TOPIC_VALVE_HOT = "RAM/PANNEAU/ETATS/ValveEC";
-static const std::string TOPIC_VALVE_SMALL = "RAM/PANNEAU/ETATS/ValvePB";
-static const std::string TOPIC_VALVE_COLD = "RAM/PANNEAU/ETATS/ValveEF";
-
-// État de la pompe
 static const std::string TOPIC_POMPE = "RAM/PANNEAU/ETATS/Pompe";
 
-// Alarmes de débordement
-static const std::string TOPIC_DEBORDEMENT_GROS = "RAM/ALARMES/ETATS/ALR_GB_OVF";
-static const std::string TOPIC_DEBORDEMENT_PETIT = "RAM/ALARMES/ETATS/ALR_PB_OVF";
-
-// Courants disponibles dans l'interface Power Meter
-static const std::string TOPIC_COURANT[8] = {
-    "RAM/POWERMETER/ETATS/Ia",
-    "RAM/POWERMETER/ETATS/Ib",
-    "", "", "", "", "", ""};
-
-static void envoyerSiTopic(Mqtt &mqtt,
-                           const std::string &topic,
-                           double valeur)
+int main(int argc, char* argv[])
 {
-    if (!topic.empty())
+    const char* portSerie = argc > 1 ? argv[1] : "/dev/pts/2";
+    int delaiReponseMs = 200;
+    if (argc > 2)
     {
-        mqtt.envoyer(topic, valeur);
+        char* fin = nullptr;
+        const long delai = std::strtol(argv[2], &fin, 10);
+        if (fin == argv[2] || *fin != '\0' || delai <= 0 || delai >= INT_MAX)
+        {
+            std::fprintf(stderr, "Délai série invalide : %s\n", argv[2]);
+            return 1;
+        }
+        delaiReponseMs = static_cast<int>(delai);
     }
-}
-
-static void envoyerLecture(Mqtt &mqtt,
-                           const PanelReading &lecture,
-                           double consignePetit,
-                           double consigneTempPetit)
-{
-    envoyerSiTopic(mqtt, TOPIC_CONSIGNE_PETIT, consignePetit);
-    envoyerSiTopic(mqtt, TOPIC_CONSIGNE_TEMP_PETIT, consigneTempPetit);
-    envoyerSiTopic(mqtt, TOPIC_NIVEAU_GROS, lecture.niveauGrosBassin);
-    envoyerSiTopic(mqtt, TOPIC_NIVEAU_PETIT, lecture.niveauPetitBassin);
-    envoyerSiTopic(mqtt, TOPIC_TEMP_GROS, lecture.temperatureGrosBassin);
-    envoyerSiTopic(mqtt, TOPIC_TEMP_PETIT, lecture.temperaturePetitBassin);
-
-    envoyerSiTopic(mqtt, TOPIC_VALVE_HOT, lecture.ouvertureValve[static_cast<int>(Valve::HotWater)]);
-    envoyerSiTopic(mqtt, TOPIC_VALVE_LARGE, lecture.ouvertureValve[static_cast<int>(Valve::LargeTank)]);
-    envoyerSiTopic(mqtt, TOPIC_VALVE_SMALL, lecture.ouvertureValve[static_cast<int>(Valve::SmallTank)]);
-    envoyerSiTopic(mqtt, TOPIC_VALVE_COLD, lecture.ouvertureValve[static_cast<int>(Valve::ColdWater)]);
-
-    for (int i = 0; i < 8; ++i)
-    {
-        envoyerSiTopic(mqtt, TOPIC_COURANT[i], lecture.courant[i]);
-    }
-
-    mqtt.envoyer(TOPIC_DEBORDEMENT_GROS,
-                 lecture.debordementGrosBassin ? "ON" : "OFF");
-
-    mqtt.envoyer(TOPIC_DEBORDEMENT_PETIT,
-                 lecture.debordementPetitBassin ? "ON" : "OFF");
-}
-
-int main()
-{
     RunPID::Reglages reglages;
     
     bool pompeEnMarche = false;
@@ -123,11 +75,19 @@ int main()
         printf("Erreur MQTT : connexion impossible\n");
         return 1;
     }
-
-    Panel panneau;
-    if (!panneau.open("/dev/pts/2"))//"/tmp/ttyRAM"
+    if (!mqtt.abonner("RAM/+/CMD/#"))
     {
-        printf("Erreur : %s\n", panneau.lastError());
+        std::fprintf(stderr, "Abonnement MQTT impossible\n");
+    }
+    if (!mqtt.abonner("RAM/+/ACK/#"))
+    {
+        std::fprintf(stderr, "Échec de l’abonnement à ConsigneGros\n");
+    }
+
+    Panel panneau(delaiReponseMs);
+    if (!panneau.open(portSerie))
+    {
+        std::fprintf(stderr, "Erreur d'ouverture du port %s : %s\n", portSerie, panneau.lastError());
         mqtt.deconnecter();
         return 1;
     }
@@ -136,11 +96,11 @@ int main()
     double ouvertureEauFroide = 0.0;
     double ouvertureGrandManuelle = 0.0;
     double ouverturePetitManuelle = 0.0;
-
     std::mutex mutexPanneau;
     RunPID runPIDThread(panneau, mutexPanneau);
-    RunMqtt reglagesMqtt(panneau, mutexPanneau);
-    
+    RunMqtt runMqttThread(runPIDThread, mqtt, panneau);
+    runMqttThread.configurerConsignes(reglages.consignePetit, reglages.consigneTemperature);
+
     auto passerEnManuel = [&] {
         reglages.automatique = false;
         runPIDThread.configurer(reglages);
@@ -165,6 +125,14 @@ int main()
 
     if (!runPIDThread.start(true))
     {
+        fermerSorties(true);
+        return 1;
+    }
+
+    if (!runMqttThread.start())
+    {
+        runPIDThread.stop();
+        runPIDThread.join();
         fermerSorties(true);
         return 1;
     }
@@ -204,6 +172,8 @@ int main()
 
     while (true)
     {
+       
+   
         const char touche = clavier.kbhit(100) ? clavier.getch() : '\0';
         if (touche == 'q' || touche == 'Q')
             break;
@@ -214,7 +184,14 @@ int main()
             erreurPanneau = resultat.erreur;
             break;
         }
-
+double temperature;
+if (runMqttThread.prendreConsigneTemperature(temperature))
+{
+    reglages.consigneTemperature = temperature;
+    runPIDThread.configurer(reglages);
+    runMqttThread.configurerConsignes(reglages.consignePetit,
+                                     reglages.consigneTemperature);
+}
         const PanelReading& lecture = resultat.lecture;
         const bool debordement = resultat.arretDebordement;
         if (debordement)
@@ -224,7 +201,7 @@ int main()
                 passerEnManuel();
                 pompeEnMarche = false;
                 debordementTraite = fermerSorties(true);
-                envoyerSiTopic(mqtt, TOPIC_POMPE, 0.0);
+                mqtt.envoyer(TOPIC_POMPE, 0.0);
             }
             if (debordementTraite && !lecture.debordementGrosBassin && !lecture.debordementPetitBassin)
                 runPIDThread.confirmerArretDebordement();
@@ -355,6 +332,7 @@ int main()
                     }
 
                     runPIDThread.configurer(reglages);
+                    runMqttThread.configurerConsignes(reglages.consignePetit, reglages.consigneTemperature);
                     saisie.clear();
                 }
             }
@@ -375,15 +353,14 @@ int main()
                     std::lock_guard<std::mutex> verrou(mutexPanneau);
                     panneau.setPump(pompeEnMarche);
                 }
-                envoyerSiTopic(mqtt, TOPIC_POMPE,
-                               pompeEnMarche ? 1.0 : 0.0);
+                mqtt.envoyer(TOPIC_POMPE, pompeEnMarche ? 1.0 : 0.0);
             }
             else if (touche == 'o' || touche == 'O')
             {
                 passerEnManuel();
                 pompeEnMarche = false;
                 fermerSorties(true);
-                envoyerSiTopic(mqtt, TOPIC_POMPE, 0.0);
+                mqtt.envoyer(TOPIC_POMPE, 0.0);
             }
             else if (touche == 'l' || touche == 'L')
             {
@@ -457,9 +434,6 @@ int main()
             ouvertureEauChaude = resultat.ouvertureChaude;
             ouvertureEauFroide = resultat.ouvertureFroide;
         }
-
-        envoyerLecture(mqtt, lecture, reglages.consignePetit, reglages.consigneTemperature);
-
         pidLog.enregistrer(
             lecture.niveauGrosBassin,
             reglages.consigneGros,
@@ -545,16 +519,18 @@ int main()
         std::fflush(stdout);
     }
 
+    runMqttThread.stop();
     runPIDThread.stop();
+    runMqttThread.join();
     runPIDThread.join();
     const bool sortiesFermees = fermerSorties(true);
-    envoyerSiTopic(mqtt, TOPIC_POMPE, 0.0);
+    mqtt.envoyer(TOPIC_POMPE, 0.0);
     panneau.close();
     mqtt.deconnecter();
 
     std::printf("\033[?25h");
     std::fflush(stdout);
     if (!erreurPanneau.empty())
-        std::fprintf(stderr, "Erreur RunPID : %s\n", erreurPanneau.c_str());
+        std::fprintf(stderr, "Erreur RunPID sur %s : %s\n", portSerie, erreurPanneau.c_str());
     return erreurPanneau.empty() && sortiesFermees ? 0 : 1;
 }

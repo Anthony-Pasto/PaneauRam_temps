@@ -34,6 +34,7 @@ public:
         TermesPID gros{};
         TermesPID petit{};
         TermesPID temperature{};
+        bool automatique = false;
     };
 
     RunPID(Panel& panneau, std::mutex& mutexPanneau);

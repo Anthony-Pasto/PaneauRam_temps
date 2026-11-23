@@ -7,7 +7,6 @@
 // J'ai mis les valeurs du simulateur qui est un cas "idéal".
 // Sur le panneau, mesurez et changez les réglages
 static const int BAUDS = 115200;
-static const int DELAI_REPONSE_MAX_MS = 200;
 
 // Le sens de chaque valve
 // true = fermée à 4 mA et ouverte à 20 mA; false = fermée à 20mA et ouverte à 4mA.
@@ -41,7 +40,7 @@ static double borner(double valeur, double bas, double haut) {
     return valeur;
 }
 
-Panel::Panel() {
+Panel::Panel(int delaiReponseMs) : delaiReponseMs(delaiReponseMs) {
     erreur[0] = '\0';
 }
 
@@ -87,13 +86,13 @@ double Panel::valveFromReadback(Valve valve, double courantRelu) const {
 
 bool Panel::sendCommand(const char* trame) {
     char reponse[32];
-    int n = port.request(trame, reponse, sizeof reponse, DELAI_REPONSE_MAX_MS);
+    int n = port.request(trame, reponse, sizeof reponse, delaiReponseMs);
     if (n < 0) {
         snprintf(erreur, sizeof erreur, "%s : %s", trame, port.lastError());
         return false;
     }
     if (n == 0) {
-        snprintf(erreur, sizeof erreur, "%s : aucune réponse en %d ms", trame, DELAI_REPONSE_MAX_MS);
+        snprintf(erreur, sizeof erreur, "%s : aucune réponse en %d ms", trame, delaiReponseMs);
         return false;
     }
     if (reponse[0] != '>') {
@@ -112,7 +111,7 @@ const char* Panel::errorDetail(int n, const char* reponse) const {
 
 bool Panel::read(PanelReading& lecture) {
     char reponse[96];
-    int n = port.request("#01", reponse, sizeof reponse, DELAI_REPONSE_MAX_MS);
+    int n = port.request("#01", reponse, sizeof reponse, delaiReponseMs);
     if (n <= 0 || reponse[0] != '>') {
         snprintf(erreur, sizeof erreur, "#01 : pas de réponse valide (%d) : %s", n,
                  errorDetail(n, reponse));
@@ -146,7 +145,7 @@ bool Panel::read(PanelReading& lecture) {
         lecture.temperatureGrosBassin = t7;
     }
 
-    n = port.request("@05", reponse, sizeof reponse, DELAI_REPONSE_MAX_MS);
+    n = port.request("@05", reponse, sizeof reponse, delaiReponseMs);
     if (n <= 0 || reponse[0] != '>') {
         snprintf(erreur, sizeof erreur, "@05 : pas de réponse valide (%d) : %s", n,
                  errorDetail(n, reponse));
@@ -188,16 +187,25 @@ bool Panel::setDigitalOutput(int sortie, bool active) {
 }
 
 bool Panel::setPump(bool enMarche) {
-    return setDigitalOutput(0, enMarche);
+    if (!setDigitalOutput(0, enMarche))
+        return false;
+    pompeEnMarche = enMarche;
+    return true;
 }
 
 // !! l'eau chaude est sur la sortie 3 (DO-4), pas sur DO-2 comme le dit le schéma !!
 bool Panel::setHotWater(bool ouverte) {
-    return setDigitalOutput(3, ouverte);
+    if (!setDigitalOutput(3, ouverte))
+        return false;
+    eauChaudeActive = ouverte;
+    return true;
 }
 
 bool Panel::setColdWater(bool ouverte) {
-    return setDigitalOutput(2, ouverte);
+    if (!setDigitalOutput(2, ouverte))
+        return false;
+    eauFroideActive = ouverte;
+    return true;
 }
 
 bool Panel::readModuleName(int adresse, char* nom, size_t taille) {
@@ -208,11 +216,23 @@ bool Panel::readModuleName(int adresse, char* nom, size_t taille) {
     char trame[8];
     char reponse[32];
     snprintf(trame, sizeof trame, "$%02dM", adresse);
-    int n = port.request(trame, reponse, sizeof reponse, DELAI_REPONSE_MAX_MS);
+    int n = port.request(trame, reponse, sizeof reponse, delaiReponseMs);
     if (n < 3 || reponse[0] != '!') {
         snprintf(erreur, sizeof erreur, "%s : pas de réponse valide", trame);
         return false;
     }
     snprintf(nom, taille, "%s", reponse + 3);   // !01 suivi du nom
     return true;
+}
+
+bool Panel::isPumpOn() const {
+    return pompeEnMarche;
+}
+
+bool Panel::isHotWaterOn() const {
+    return eauChaudeActive;
+}
+
+bool Panel::isColdWaterOn() const {
+    return eauFroideActive;
 }

@@ -8,6 +8,7 @@
 #include <ctime>
 #include <fcntl.h>
 #include <poll.h>
+#include <string>
 #include <sys/file.h>
 #include <termios.h>
 #include <unistd.h>
@@ -168,10 +169,10 @@ bool SerialPort::writeLine(const char* texte, char fin) {
         snprintf(erreur, sizeof erreur, "writeLine : aucun texte");
         return false;
     }
-    if (!write(texte, strlen(texte))) {
-        return false;
-    }
-    return write(&fin, 1);
+    // Envoyer le terminateur avec la trame, notamment sur un pont PTY/TCP.
+    std::string trame(texte);
+    trame.push_back(fin);
+    return write(trame.data(), trame.size());
 }
 
 int SerialPort::attendre(int delaiMs) {

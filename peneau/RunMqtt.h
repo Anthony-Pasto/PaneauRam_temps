@@ -1,31 +1,30 @@
 #pragma once
 
 #include "Thread.h"
-#include "Panneau.h"
-#include "Mqtt.h"
 #include <mutex>
-#include <string>
+
+class Mqtt;
+class RunPID;
+class Panel;
 
 class RunMqtt : public Thread {
 public:
-   
-    RunMqtt(Panel& panneau, std::mutex& mutexPanneau);
+    RunMqtt(const RunPID& runPID, Mqtt& mqtt, Panel& panneau);
     ~RunMqtt() override;
 
-    void configurer(const Reglages& nouveauxReglages, bool reinitialiser = false);
-    Resultat getResultat() const;
+    void configurerConsignes(double petit, double temperature);
+    bool prendreConsigneTemperature(double& valeur);
 
 protected:
     void task() override;
 
 private:
-    
+    const RunPID& runPID;
+    Mqtt& mqtt;
     Panel& panneau;
-    std::mutex& mutexPanneau;
-
-   
-    mutable std::mutex mutexEtat;
-    Reglages reglages;
-    
-    Resultat resultat;
+    std::mutex mutexConsignes;
+    double consignePetit = 0.0;
+    double consigneTemperature = 0.0;
+    bool nouvelleConsigneTemperature = false;
+double temperatureRecue = 0.0;
 };
