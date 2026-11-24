@@ -50,7 +50,7 @@ void RunMqtt::task()
                 (categorie != "CMD" && categorie != "ACK"))
                 continue;
 
-            ValeurRecue MisesAJour::* champ = nullptr;
+            ValeurRecue MisesAJour::*champ = nullptr;
             if (capteur == "ConsTmpPB" || capteur == "ConsTempPB")
                 champ = &MisesAJour::consigneTemperature;
             else if (capteur == "Mode")
@@ -85,11 +85,13 @@ void RunMqtt::task()
                 champ = &MisesAJour::alarmePetit;
             else if (capteur == "ALR_GB_OVF")
                 champ = &MisesAJour::alarmeGros;
+            else if (capteur == "TemperatureActive")
+                champ = &MisesAJour::temperatureActive;
 
             if (champ)
             {
                 std::lock_guard<std::mutex> verrou(mutexConsignes);
-                auto& valeur = enAttente.*champ;
+                auto &valeur = enAttente.*champ;
                 if (categorie == "ACK" && valeur.estCommande)
                     continue;
                 valeur.contenu = message.contenu;
@@ -100,6 +102,8 @@ void RunMqtt::task()
         }
 
         const auto resultat = runPID.getResultat();
+        mqtt.envoyer("RAM/PANNEAU/ETATS/TemperatureActive", resultat.temperatureActive ? "ON" : "OFF");
+        mqtt.envoyer("RAM/PANNEAU/ETATS/Mode", resultat.automatique ? "AUTO" : "MANUEL");
         if (resultat.disponible)
         {
             const PanelReading &lecture = resultat.lecture;
@@ -117,7 +121,6 @@ void RunMqtt::task()
             // mqtt.envoyer("RAM/POWERMETER/ETATS/Ib", lecture.courant[1]);
             mqtt.envoyer("RAM/ALARMES/ETATS/ALR_GB_OVF", lecture.debordementGrosBassin ? "ON" : "OFF");
             mqtt.envoyer("RAM/ALARMES/ETATS/ALR_PB_OVF", lecture.debordementPetitBassin ? "ON" : "OFF");
-            mqtt.envoyer("RAM/PANNEAU/ETATS/Mode", resultat.automatique ? "AUTO" : "MANUAL");
             mqtt.envoyer("RAM/PANNEAU/ETATS/Pompe", panneau.isPumpOn() ? "ON" : "OFF");
         }
 
@@ -125,7 +128,7 @@ void RunMqtt::task()
     }
 }
 
-bool RunMqtt::prendreMisesAJour(MisesAJour& valeurs)
+bool RunMqtt::prendreMisesAJour(MisesAJour &valeurs)
 {
     std::lock_guard<std::mutex> verrou(mutexConsignes);
     if (!misesAJourDisponibles)
@@ -137,13 +140,13 @@ bool RunMqtt::prendreMisesAJour(MisesAJour& valeurs)
     return true;
 }
 
-bool RunMqtt::ValeurRecue::lireConsigne(double& valeur) const
+bool RunMqtt::ValeurRecue::lireConsigne(double &valeur) const
 {
     if (!recue || !estCommande)
         return false;
 
-    const char* texte = contenu.c_str();
-    char* fin = nullptr;
+    const char *texte = contenu.c_str();
+    char *fin = nullptr;
     const double nombre = std::strtod(texte, &fin);
     if (fin == texte || fin != texte + contenu.size() ||
         !std::isfinite(nombre) || nombre < 0.0 || nombre > 100.0)

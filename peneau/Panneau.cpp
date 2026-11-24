@@ -10,7 +10,7 @@ static const int BAUDS = 115200;
 
 // Le sens de chaque valve
 // true = fermée à 4 mA et ouverte à 20 mA; false = fermée à 20mA et ouverte à 4mA.
-static const bool OUVRE_AU_COURANT_FORT[4] = {true, true, true, true};
+static const bool OUVRE_AU_COURANT_FORT[4] = {false, true, false, true};
 
 static const double RELECTURE_4MA[4] = {4.0, 4.0, 4.0, 4.0};
 static const double RELECTURE_20MA[4] = {20.0, 20.0, 20.0, 20.0};
@@ -206,6 +206,17 @@ bool Panel::setColdWater(bool ouverte) {
         return false;
     eauFroideActive = ouverte;
     return true;
+}
+
+bool Panel::fermerSorties(bool arreterPompe) {
+    bool ok = !arreterPompe || setPump(false);
+    ok = setHotWater(false) && ok;
+    ok = setColdWater(false) && ok;
+    ok = setValve(Valve::LargeTank, 0.0) && ok;
+    ok = setValve(Valve::SmallTank, 0.0) && ok;
+    ok = setValve(Valve::HotWater, 0.0) && ok;
+    ok = setValve(Valve::ColdWater, 0.0) && ok;
+    return ok;
 }
 
 bool Panel::readModuleName(int adresse, char* nom, size_t taille) {

@@ -50,13 +50,13 @@ static void afficherBarre(const char *titre, double valeur, double consigne)
 
 static const std::string TOPIC_POMPE = "RAM/PANNEAU/ETATS/Pompe";
 
-int main(int argc, char* argv[])
+int main(int argc, char *argv[])
 {
-    const char* portSerie = argc > 1 ? argv[1] : "/dev/pts/2";
+    const char *portSerie = argc > 1 ? argv[1] : "/dev/pts/2";
     int delaiReponseMs = 200;
     if (argc > 2)
     {
-        char* fin = nullptr;
+        char *fin = nullptr;
         const long delai = std::strtol(argv[2], &fin, 10);
         if (fin == argv[2] || *fin != '\0' || delai <= 0 || delai >= INT_MAX)
         {
@@ -66,7 +66,7 @@ int main(int argc, char* argv[])
         delaiReponseMs = static_cast<int>(delai);
     }
     RunPID::Reglages reglages;
-    
+
     bool pompeEnMarche = false;
 
     Mqtt mqtt;
@@ -101,19 +101,15 @@ int main(int argc, char* argv[])
     RunMqtt runMqttThread(runPIDThread, mqtt, panneau);
     runMqttThread.configurerConsignes(reglages.consignePetit, reglages.consigneTemperature);
 
-    auto passerEnManuel = [&] {
+    auto passerEnManuel = [&]
+    {
         reglages.automatique = false;
         runPIDThread.configurer(reglages);
     };
-    auto fermerSorties = [&](bool arreterPompe) {
+    auto fermerSorties = [&](bool arreterPompe)
+    {
         std::lock_guard<std::mutex> verrou(mutexPanneau);
-        bool ok = !arreterPompe || panneau.setPump(false);
-        ok = panneau.setHotWater(false) && ok;
-        ok = panneau.setColdWater(false) && ok;
-        ok = panneau.setValve(Valve::LargeTank, 0.0) && ok;
-        ok = panneau.setValve(Valve::SmallTank, 0.0) && ok;
-        ok = panneau.setValve(Valve::HotWater, 0.0) && ok;
-        ok = panneau.setValve(Valve::ColdWater, 0.0) && ok;
+        const bool ok = panneau.fermerSorties(arreterPompe);
         ouvertureGrandManuelle = 0.0;
         ouverturePetitManuelle = 0.0;
         ouvertureEauChaude = 0.0;
@@ -172,19 +168,37 @@ int main(int argc, char* argv[])
 
     while (true)
     {
-       
-   
+
         const char touche = clavier.kbhit(100) ? clavier.getch() : '\0';
         if (touche == 'q' || touche == 'Q')
             break;
 
         const RunPID::Resultat resultat = runPIDThread.getResultat();
-        if (!resultat.erreur.empty())
+        if (resultat.arretSerie)
         {
+            passerEnManuel();
+            pompeEnMarche = panneau.isPumpOn();
+            pompeEnMarche = false;
+            ouvertureGrandManuelle = 0.0;
+            ouverturePetitManuelle = 0.0;
+            ouvertureEauChaude = 0.0;
+            ouvertureEauFroide = 0.0;
             erreurPanneau = resultat.erreur;
-            break;
+
+            if (!resultat.disponible)
+            {
+                effacerEcran();
+                std::fprintf(stderr, "Défaut série : %s\n",
+                             resultat.erreur.c_str());
+            }
+            else
+            {
+                runPIDThread.confirmerArretSerie();
+            }
+            continue;
         }
-        const PanelReading& lecture = resultat.lecture;
+        erreurPanneau.clear();
+        const PanelReading &lecture = resultat.lecture;
         const bool debordement = resultat.arretDebordement;
         if (debordement)
         {
@@ -209,9 +223,14 @@ int main(int argc, char* argv[])
             const bool gros = valeurs.consigneGros.lireConsigne(reglages.consigneGros);
             const bool petit = valeurs.consignePetit.lireConsigne(reglages.consignePetit);
             const bool temperature = valeurs.consigneTemperature.lireConsigne(reglages.consigneTemperature);
-            auto commandeEst = [](const RunMqtt::ValeurRecue& valeur, const char* texte) {
+            auto commandeEst = [](const RunMqtt::ValeurRecue &valeur, const char *texte)
+            {
                 return valeur.recue && valeur.estCommande && valeur.contenu == texte;
             };
+            const bool temperatureOn = commandeEst(valeurs.temperatureActive, "ON");
+            const bool temperatureOff = commandeEst(valeurs.temperatureActive, "OFF");
+            if (temperatureOn || temperatureOff)
+                reglages.temperatureActive = temperatureOn;
             const bool activerAuto = !reglages.automatique && commandeEst(valeurs.mode, "AUTO");
             if (commandeEst(valeurs.mode, "MANUAL") || commandeEst(valeurs.mode, "MANUEL"))
             {
@@ -223,7 +242,7 @@ int main(int argc, char* argv[])
                 reglages.automatique = true;
                 runPIDThread.configurer(reglages, true);
             }
-            else if (gros || petit || temperature)
+            else if (gros || petit || temperature || temperatureOn || temperatureOff)
             {
                 runPIDThread.configurer(reglages);
             }
@@ -235,6 +254,8 @@ int main(int argc, char* argv[])
             if (pompeOn || pompeOff)
             {
                 std::lock_guard<std::mutex> verrou(mutexPanneau);
+                if (runPIDThread.getResultat().arretSerie)
+                    continue;
                 if (panneau.setPump(pompeOn))
                     pompeEnMarche = pompeOn;
             }
@@ -242,7 +263,10 @@ int main(int argc, char* argv[])
             if (!reglages.automatique)
             {
                 std::lock_guard<std::mutex> verrou(mutexPanneau);
-                auto reglerValve = [&](const RunMqtt::ValeurRecue& valeur, Valve valve, double& ouverture) {
+                if (runPIDThread.getResultat().arretSerie)
+                    continue;
+                auto reglerValve = [&](const RunMqtt::ValeurRecue &valeur, Valve valve, double &ouverture)
+                {
                     double demande;
                     if (valeur.lireConsigne(demande) && panneau.setValve(valve, demande))
                         ouverture = demande;
@@ -280,6 +304,8 @@ int main(int argc, char* argv[])
             else if (!reglages.automatique && (touche == '+' || touche == '='))
             {
                 std::lock_guard<std::mutex> verrou(mutexPanneau);
+                if (runPIDThread.getResultat().arretSerie)
+                    continue;
                 if (valveManuelle == ValveManuelle::Grand)
                 {
                     ouvertureGrandManuelle = bornerPourcentage(ouvertureGrandManuelle + 10.0);
@@ -304,6 +330,8 @@ int main(int argc, char* argv[])
             else if (!reglages.automatique && touche == '-')
             {
                 std::lock_guard<std::mutex> verrou(mutexPanneau);
+                if (runPIDThread.getResultat().arretSerie)
+                    continue;
                 if (valveManuelle == ValveManuelle::Grand)
                 {
                     ouvertureGrandManuelle = bornerPourcentage(ouvertureGrandManuelle - 10.0);
@@ -399,6 +427,8 @@ int main(int argc, char* argv[])
                 pompeEnMarche = !pompeEnMarche;
                 {
                     std::lock_guard<std::mutex> verrou(mutexPanneau);
+                    if (runPIDThread.getResultat().arretSerie)
+                        continue;
                     panneau.setPump(pompeEnMarche);
                 }
                 mqtt.envoyer(TOPIC_POMPE, pompeEnMarche ? 1.0 : 0.0);
@@ -420,6 +450,8 @@ int main(int argc, char* argv[])
                 {
                     ouverture = bornerPourcentage(ouverture);
                     std::lock_guard<std::mutex> verrou(mutexPanneau);
+                    if (runPIDThread.getResultat().arretSerie)
+                        continue;
                     panneau.setValve(Valve::LargeTank, ouverture);
                     ouvertureGrandManuelle = ouverture;
                 }
@@ -437,6 +469,8 @@ int main(int argc, char* argv[])
                 {
                     ouverture = bornerPourcentage(ouverture);
                     std::lock_guard<std::mutex> verrou(mutexPanneau);
+                    if (runPIDThread.getResultat().arretSerie)
+                        continue;
                     panneau.setValve(Valve::SmallTank, ouverture);
                     ouverturePetitManuelle = ouverture;
                 }
@@ -447,6 +481,8 @@ int main(int argc, char* argv[])
             else if (!reglages.automatique && (touche == 'h' || touche == 'H'))
             {
                 std::lock_guard<std::mutex> verrou(mutexPanneau);
+                if (runPIDThread.getResultat().arretSerie)
+                    continue;
                 valveManuelle = ValveManuelle::Chaude;
                 ouvertureEauChaude = (ouvertureEauChaude > 0.0) ? 0.0 : 100.0;
                 panneau.setValve(Valve::HotWater, ouvertureEauChaude);
@@ -455,6 +491,8 @@ int main(int argc, char* argv[])
             else if (!reglages.automatique && (touche == 'f' || touche == 'F'))
             {
                 std::lock_guard<std::mutex> verrou(mutexPanneau);
+                if (runPIDThread.getResultat().arretSerie)
+                    continue;
                 valveManuelle = ValveManuelle::Froide;
                 ouvertureEauFroide = (ouvertureEauFroide > 0.0) ? 0.0 : 100.0;
                 panneau.setValve(Valve::ColdWater, ouvertureEauFroide);

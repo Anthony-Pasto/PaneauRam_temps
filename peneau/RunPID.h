@@ -25,6 +25,8 @@ public:
     struct Resultat {
         bool disponible = false;
         bool arretDebordement = false;
+        bool arretSerie = false;
+        bool sortiesFermees = false;
         std::string erreur;
         PanelReading lecture{};
         double ouvertureGros = 0.0;
@@ -34,6 +36,7 @@ public:
         TermesPID gros{};
         TermesPID petit{};
         TermesPID temperature{};
+        bool temperatureActive = false;
         bool automatique = false;
     };
 
@@ -43,6 +46,7 @@ public:
     void configurer(const Reglages& nouveauxReglages, bool reinitialiser = false);
     Resultat getResultat() const;
     void confirmerArretDebordement();
+    void confirmerArretSerie();
 
 protected:
     void task() override;

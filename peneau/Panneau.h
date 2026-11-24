@@ -57,6 +57,7 @@
 //     if (panneau.read(lecture)) { printf("%.1f %%\n", lecture.niveauGrosBassin); }
 #pragma once
 
+#include <atomic>
 #include <cstddef>
 #include "SerialPort.h"
 
@@ -97,6 +98,7 @@ public:
     bool setPump(bool enMarche);
     bool setHotWater(bool ouverte);
     bool setColdWater(bool ouverte);
+    bool fermerSorties(bool arreterPompe);
 
     // Le nom d'un module ($AAM -> !AAnom). Pour vérifier le branchement.
     bool readModuleName(int adresse, char* nom, size_t taille);
@@ -117,7 +119,7 @@ private:
     const int delaiReponseMs;
     char erreur[160];
 
-    bool pompeEnMarche = false;
-    bool eauChaudeActive = false;
-    bool eauFroideActive = false;
+    std::atomic<bool> pompeEnMarche{false};
+    std::atomic<bool> eauChaudeActive{false};
+    std::atomic<bool> eauFroideActive{false};
 };

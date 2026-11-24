@@ -25,6 +25,9 @@ void RunPID::configurer(const Reglages& nouveauxReglages, bool reinitialiser)
     resetPIDs = resetPIDs || reinitialiser || (!reglages.automatique && nouveauxReglages.automatique);
     resetTemperature = resetTemperature || (reglages.temperatureActive != nouveauxReglages.temperatureActive);
     reglages = nouveauxReglages;
+    resultat.temperatureActive = reglages.temperatureActive;
+    resultat.automatique = reglages.automatique &&
+                           !resultat.arretDebordement && !resultat.arretSerie;
 }
 
 RunPID::Resultat RunPID::getResultat() const
@@ -40,28 +43,70 @@ void RunPID::confirmerArretDebordement()
         resultat.arretDebordement = false;
 }
 
+void RunPID::confirmerArretSerie()
+{
+    std::lock_guard<std::mutex> verrou(mutexEtat);
+    if (resultat.disponible)
+    {
+        reglages.automatique = false;
+        resultat.arretSerie = false;
+    }
+}
+
 void RunPID::task()
 {
     using Horloge = std::chrono::steady_clock;
     const std::chrono::milliseconds periode(100);
     const double dtNominal = std::chrono::duration<double>(periode).count();
     auto dernierCalcul = Horloge::now();
+    auto prochainCycle = Horloge::now();
+    bool fermetureEnAttente = false;
+
+    // Le verrou du panneau est détenu jusqu'à la publication du défaut.
+    auto arreterSurErreur = [&] {
+        const std::string erreur = panneau.lastError();
+        fermetureEnAttente = !panneau.fermerSorties(true);
+
+        std::lock_guard<std::mutex> verrou(mutexEtat);
+        resultat.arretSerie = true;
+        resultat.sortiesFermees = !fermetureEnAttente;
+        resultat.disponible = false;
+        resultat.erreur = erreur;
+        resultat.automatique = false;
+        reglages.automatique = false;
+    };
 
     while (enMarche)
     {
-        const auto prochainCycle = Horloge::now() + periode;
+        std::this_thread::sleep_until(prochainCycle);
+        if (!enMarche)
+            break;
+
+        prochainCycle = Horloge::now() + periode;
         Resultat cycle;
         {
             std::lock_guard<std::mutex> verrouPanneau(mutexPanneau);
             if (!enMarche)
                 return;
 
+            if (fermetureEnAttente)
+            {
+                fermetureEnAttente = !panneau.fermerSorties(true);
+                {
+                    std::lock_guard<std::mutex> verrou(mutexEtat);
+                    resultat.sortiesFermees = !fermetureEnAttente;
+                }
+                if (fermetureEnAttente)
+                {
+                    prochainCycle = Horloge::now() + periode;
+                    continue;
+                }
+            }
+
             if (!panneau.read(cycle.lecture))
             {
-                std::lock_guard<std::mutex> verrou(mutexEtat);
-                resultat.disponible = false;
-                resultat.erreur = panneau.lastError();
-                return;
+                arreterSurErreur();
+                continue;
             }
 
             Reglages commandes;
@@ -70,7 +115,8 @@ void RunPID::task()
             {
                 std::lock_guard<std::mutex> verrou(mutexEtat);
                 commandes = reglages;
-                commandes.automatique = commandes.automatique && !resultat.arretDebordement;
+                commandes.automatique = commandes.automatique &&
+                                        !resultat.arretDebordement && !resultat.arretSerie;
                 reinitialiser = resetPIDs;
                 reinitialiserTemperature = resetTemperature;
                 resetPIDs = false;
@@ -114,10 +160,8 @@ void RunPID::task()
                     !panneau.setHotWater(cycle.ouvertureChaude > 0.0) ||
                     !panneau.setColdWater(cycle.ouvertureFroide > 0.0))
                 {
-                    std::lock_guard<std::mutex> verrou(mutexEtat);
-                    resultat.disponible = false;
-                    resultat.erreur = panneau.lastError();
-                    return;
+                    arreterSurErreur();
+                    continue;
                 }
             }
         }
@@ -133,10 +177,13 @@ void RunPID::task()
                 reglages.automatique = false;
             // Conserver une alarme même si elle disparaît entre deux lectures de main.
             cycle.arretDebordement = resultat.arretDebordement || debordement;
-            cycle.automatique = reglages.automatique;
+            cycle.arretSerie = resultat.arretSerie;
+            cycle.sortiesFermees = resultat.sortiesFermees;
+            cycle.temperatureActive = reglages.temperatureActive;
+            cycle.automatique = reglages.automatique &&
+                                !cycle.arretDebordement && !cycle.arretSerie;
             resultat = cycle;
         }
 
-        std::this_thread::sleep_until(prochainCycle);
     }
 }

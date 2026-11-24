@@ -20,6 +20,7 @@ public:
 
     struct MisesAJour {
         ValeurRecue consigneTemperature;
+        ValeurRecue temperatureActive;
         ValeurRecue mode;
         ValeurRecue pompe;
         ValeurRecue valveEC;
