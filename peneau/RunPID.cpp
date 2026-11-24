@@ -1,7 +1,42 @@
 #include "RunPID.h"
 
+#include <algorithm>
 #include <chrono>
 #include <thread>
+
+namespace {
+using Horloge = std::chrono::steady_clock;
+
+struct TemporisationNiveauHaut {
+    bool active = false;
+    bool transitionEnCours = false;
+    Horloge::time_point debutTransition{};
+
+    bool actualiser(bool auSeuil, Horloge::time_point instant,
+                    double delaiActivation, double delaiDesactivation)
+    {
+        if (auSeuil == active)
+        {
+            transitionEnCours = false;
+            return active;
+        }
+
+        if (!transitionEnCours)
+        {
+            debutTransition = instant;
+            transitionEnCours = true;
+        }
+
+        const double delai = auSeuil ? delaiActivation : delaiDesactivation;
+        if (std::chrono::duration<double>(instant - debutTransition).count() >= delai)
+        {
+            active = auSeuil;
+            transitionEnCours = false;
+        }
+        return active;
+    }
+};
+}
 
 RunPID::RunPID(Panel& panneau, std::mutex& mutexPanneau)
     : Thread("RunPID", SCHED_FIFO, 50, 2),
@@ -25,6 +60,9 @@ void RunPID::configurer(const Reglages& nouveauxReglages, bool reinitialiser)
     resetPIDs = resetPIDs || reinitialiser || (!reglages.automatique && nouveauxReglages.automatique);
     resetTemperature = resetTemperature || (reglages.temperatureActive != nouveauxReglages.temperatureActive);
     reglages = nouveauxReglages;
+    resultat.hauterMaxGB = reglages.hauterMaxGB;
+    if (resultat.arretDebordement || resultat.arretSerie)
+        reglages.automatique = false;
     resultat.temperatureActive = reglages.temperatureActive;
     resultat.automatique = reglages.automatique &&
                            !resultat.arretDebordement && !resultat.arretSerie;
@@ -33,14 +71,46 @@ void RunPID::configurer(const Reglages& nouveauxReglages, bool reinitialiser)
 RunPID::Resultat RunPID::getResultat() const
 {
     std::lock_guard<std::mutex> verrou(mutexEtat);
-    return resultat;
+    Resultat copie = resultat;
+    for (std::size_t i = 0; i < alarmes.size(); ++i)
+        copie.alarmesMemorisees[i] = alarmes[i].verrouillee;
+    copie.alarmesMemorisees[static_cast<std::size_t>(Alarme::NiveauMaxGros)] =
+        resultat.niveauMaxGrosActif;
+    copie.alarmesMemorisees[static_cast<std::size_t>(Alarme::NiveauMaxPetit)] =
+        resultat.niveauMaxPetitActif;
+    return copie;
 }
 
-void RunPID::confirmerArretDebordement()
+void RunPID::actualiserAlarme(Alarme alarme, bool active)
 {
     std::lock_guard<std::mutex> verrou(mutexEtat);
-    if (!resultat.lecture.debordementGrosBassin && !resultat.lecture.debordementPetitBassin)
-        resultat.arretDebordement = false;
+    auto& etat = alarmes[static_cast<std::size_t>(alarme)];
+    etat.active = active;
+    if (active && alarme != Alarme::NiveauMaxGros && alarme != Alarme::NiveauMaxPetit)
+    {
+        if (!resultat.arretDebordement)
+            resultat.fermetureAlarmeConfirmee = false;
+        etat.verrouillee = true;
+        resultat.arretDebordement = true;
+        reglages.automatique = false;
+        resultat.automatique = false;
+    }
+}
+
+void RunPID::acquitterAlarme(Alarme alarme)
+{
+    std::lock_guard<std::mutex> verrou(mutexEtat);
+    if (alarme == Alarme::NiveauMaxGros || alarme == Alarme::NiveauMaxPetit)
+        return;
+
+    auto& etat = alarmes[static_cast<std::size_t>(alarme)];
+    if (etat.active || !resultat.fermetureAlarmeConfirmee ||
+        resultat.arretSerie || !resultat.disponible)
+        return;
+
+    etat.verrouillee = false;
+    resultat.arretDebordement = std::any_of(alarmes.begin(), alarmes.end(),
+        [](const EtatAlarme& autre) { return autre.verrouillee; });
 }
 
 void RunPID::confirmerArretSerie()
@@ -55,15 +125,18 @@ void RunPID::confirmerArretSerie()
 
 void RunPID::task()
 {
-    using Horloge = std::chrono::steady_clock;
     const std::chrono::milliseconds periode(100);
     const double dtNominal = std::chrono::duration<double>(periode).count();
     auto dernierCalcul = Horloge::now();
     auto prochainCycle = Horloge::now();
     bool fermetureEnAttente = false;
+    TemporisationNiveauHaut niveauHautGros;
+    TemporisationNiveauHaut niveauHautPetit;
 
     // Le verrou du panneau est détenu jusqu'à la publication du défaut.
     auto arreterSurErreur = [&] {
+        niveauHautGros.transitionEnCours = false;
+        niveauHautPetit.transitionEnCours = false;
         const std::string erreur = panneau.lastError();
         fermetureEnAttente = !panneau.fermerSorties(true);
 
@@ -74,6 +147,18 @@ void RunPID::task()
         resultat.erreur = erreur;
         resultat.automatique = false;
         reglages.automatique = false;
+    };
+
+    auto fermerSiAlarme = [&] {
+        {
+            std::lock_guard<std::mutex> verrou(mutexEtat);
+            if (!resultat.arretDebordement || resultat.fermetureAlarmeConfirmee)
+                return true;
+        }
+        const bool ok = panneau.fermerSorties(true);
+        std::lock_guard<std::mutex> verrou(mutexEtat);
+        resultat.fermetureAlarmeConfirmee = ok;
+        return ok;
     };
 
     while (enMarche)
@@ -103,9 +188,35 @@ void RunPID::task()
                 }
             }
 
+            if (!fermerSiAlarme())
+            {
+                niveauHautGros.transitionEnCours = false;
+                niveauHautPetit.transitionEnCours = false;
+                prochainCycle = Horloge::now() + periode;
+                continue;
+            }
+
             if (!panneau.read(cycle.lecture))
             {
                 arreterSurErreur();
+                continue;
+            }
+
+            actualiserAlarme(Alarme::DebordementGros, cycle.lecture.debordementGrosBassin);
+            actualiserAlarme(Alarme::DebordementPetit, cycle.lecture.debordementPetitBassin);
+            {
+                std::lock_guard<std::mutex> verrou(mutexEtat);
+                const auto instantLecture = Horloge::now();
+                resultat.niveauMaxGrosActif = niveauHautGros.actualiser(
+                    cycle.lecture.niveauGrosBassin >= reglages.hauterMaxGB, instantLecture,
+                    reglages.tempsActiveAlarmeGB, reglages.tempsIgnorerGB);
+                resultat.niveauMaxPetitActif = niveauHautPetit.actualiser(
+                    cycle.lecture.niveauPetitBassin >= reglages.hauterMaxPB, instantLecture,
+                    reglages.tempsActiveAlarmePB, reglages.tempsIgnorerPB);
+            }
+            if (!fermerSiAlarme())
+            {
+                prochainCycle = Horloge::now() + periode;
                 continue;
             }
 
@@ -172,14 +283,14 @@ void RunPID::task()
         cycle.temperature = {pidTemperature.termP(), pidTemperature.termI(), pidTemperature.termD()};
         {
             std::lock_guard<std::mutex> verrou(mutexEtat);
-            const bool debordement = cycle.lecture.debordementGrosBassin || cycle.lecture.debordementPetitBassin;
-            if (debordement)
-                reglages.automatique = false;
-            // Conserver une alarme même si elle disparaît entre deux lectures de main.
-            cycle.arretDebordement = resultat.arretDebordement || debordement;
+            cycle.arretDebordement = resultat.arretDebordement;
+            cycle.niveauMaxGrosActif = resultat.niveauMaxGrosActif;
+            cycle.niveauMaxPetitActif = resultat.niveauMaxPetitActif;
+            cycle.fermetureAlarmeConfirmee = resultat.fermetureAlarmeConfirmee;
             cycle.arretSerie = resultat.arretSerie;
             cycle.sortiesFermees = resultat.sortiesFermees;
             cycle.temperatureActive = reglages.temperatureActive;
+            cycle.hauterMaxGB = reglages.hauterMaxGB;
             cycle.automatique = reglages.automatique &&
                                 !cycle.arretDebordement && !cycle.arretSerie;
             resultat = cycle;

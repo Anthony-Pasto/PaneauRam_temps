@@ -12,7 +12,6 @@ class RunMqtt : public Thread {
 public:
     struct ValeurRecue {
         bool recue = false;
-        bool estCommande = false;
         std::string contenu;
 
         bool lireConsigne(double& valeur) const;
@@ -35,11 +34,16 @@ public:
         ValeurRecue nivPB;
         ValeurRecue tmpGB;
         ValeurRecue tmpPB;
-        ValeurRecue alarmePetit;
-        ValeurRecue alarmeGros;
+        ValeurRecue hauterMaxGB;
+        ValeurRecue hauterMaxPB;
+        ValeurRecue tempsActiveAlarmeGB;
+        ValeurRecue tempsActiveAlarmePB;
+        ValeurRecue tempsIgnorerGB;
+        ValeurRecue tempsIgnorerPB;
+        
     };
 
-    RunMqtt(const RunPID& runPID, Mqtt& mqtt, Panel& panneau);
+    RunMqtt(RunPID& runPID, Mqtt& mqtt, Panel& panneau);
     ~RunMqtt() override;
 
     void configurerConsignes(double petit, double temperature);
@@ -49,7 +53,7 @@ protected:
     void task() override;
 
 private:
-    const RunPID& runPID;
+    RunPID& runPID;
     Mqtt& mqtt;
     Panel& panneau;
     std::mutex mutexConsignes;

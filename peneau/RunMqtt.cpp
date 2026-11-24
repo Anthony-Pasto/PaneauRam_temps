@@ -10,7 +10,7 @@
 #include <sstream>
 #include <utility>
 
-RunMqtt::RunMqtt(const RunPID &runPID, Mqtt &mqtt, Panel &panneau)
+RunMqtt::RunMqtt(RunPID &runPID, Mqtt &mqtt, Panel &panneau)
     : Thread("RunMqtt"), runPID(runPID), mqtt(mqtt), panneau(panneau)
 {
 }
@@ -46,8 +46,52 @@ void RunMqtt::task()
                 !std::getline(topic, categorie, '/') ||
                 !std::getline(topic, capteur, '/') ||
                 topic.peek() != std::char_traits<char>::eof() ||
-                reseau != "RAM" || domaine != "PANNEAU" ||
-                (categorie != "CMD" && categorie != "ACK"))
+                reseau != "RAM")
+                continue;
+
+            using Alarme = RunPID::Alarme;
+            Alarme alarme = Alarme::Nombre;
+            if (capteur == "ALR_GB_OVF")
+                alarme = Alarme::DebordementGros;
+            else if (capteur == "ALR_PB_OVF")
+                alarme = Alarme::DebordementPetit;
+            else if (capteur == "ALR_GB_NIV_MAX")
+                alarme = Alarme::NiveauMaxGros;
+            else if (capteur == "ALR_PB_NIV_MAX")
+                alarme = Alarme::NiveauMaxPetit;
+            else if (capteur == "ALR_CNX_BAL")
+                alarme = Alarme::ConnexionBalance;
+            else if (capteur == "ALR_CNX_POW")
+                alarme = Alarme::ConnexionPowerMeter;
+
+            if (alarme != Alarme::Nombre)
+            {
+                if (domaine == "ALARMES" && categorie == "ACK" &&
+                    alarme != Alarme::NiveauMaxGros && alarme != Alarme::NiveauMaxPetit)
+                {
+                    std::lock_guard<std::mutex> verrou(mutexConsignes);
+                    if (runPID.getResultat().arretDebordement)
+                    {
+                        enAttente = MisesAJour{};
+                        misesAJourDisponibles = false;
+                    }
+                    runPID.acquitterAlarme(alarme);
+                }
+                else if (domaine == "ALARMES" && categorie == "BRUT" &&
+                         alarme != Alarme::DebordementGros && alarme != Alarme::DebordementPetit &&
+                         alarme != Alarme::NiveauMaxGros && alarme != Alarme::NiveauMaxPetit &&
+                         (message.contenu == "ON" || message.contenu == "OFF"))
+                {
+                    runPID.actualiserAlarme(alarme, message.contenu == "ON");
+                }
+                continue;
+            }
+
+            if ((domaine != "PANNEAU" && domaine != "ALARMES" ) || categorie != "CMD")
+                continue;
+
+            const auto etat = runPID.getResultat();
+            if (etat.arretDebordement || etat.arretSerie)
                 continue;
 
             ValeurRecue MisesAJour::*champ = nullptr;
@@ -81,27 +125,43 @@ void RunMqtt::task()
                 champ = &MisesAJour::tmpGB;
             else if (capteur == "TmpPB")
                 champ = &MisesAJour::tmpPB;
-            else if (capteur == "ALR_PB_OVF")
-                champ = &MisesAJour::alarmePetit;
-            else if (capteur == "ALR_GB_OVF")
-                champ = &MisesAJour::alarmeGros;
+            else if (capteur == "NivLhGB")
+                champ = &MisesAJour::hauterMaxGB;
+            else if (capteur == "TgNivGB")
+                champ = &MisesAJour::tempsActiveAlarmeGB;
+            else if (capteur == "TrNivGB")
+                champ = &MisesAJour::tempsIgnorerGB;
             else if (capteur == "TemperatureActive")
                 champ = &MisesAJour::temperatureActive;
+            else if (capteur == "NivLhPB")
+                champ = &MisesAJour::hauterMaxPB;
+            else if (capteur == "TgNivPB")
+                champ = &MisesAJour::tempsActiveAlarmePB;
+            else if (capteur == "TrNivPB")
+                champ = &MisesAJour::tempsIgnorerPB;
 
             if (champ)
             {
                 std::lock_guard<std::mutex> verrou(mutexConsignes);
                 auto &valeur = enAttente.*champ;
-                if (categorie == "ACK" && valeur.estCommande)
-                    continue;
                 valeur.contenu = message.contenu;
-                valeur.estCommande = categorie == "CMD";
                 valeur.recue = true;
                 misesAJourDisponibles = true;
             }
         }
 
         const auto resultat = runPID.getResultat();
+        using Alarme = RunPID::Alarme;
+        auto publierAlarme = [&](Alarme alarme, const char* topic) {
+            const bool memorisee = resultat.alarmesMemorisees[static_cast<std::size_t>(alarme)];
+            mqtt.envoyer(topic, memorisee ? "ON" : "OFF");
+        };
+        publierAlarme(Alarme::DebordementGros, "RAM/ALARMES/ETATS/ALR_GB_OVF");
+        publierAlarme(Alarme::DebordementPetit, "RAM/ALARMES/ETATS/ALR_PB_OVF");
+        publierAlarme(Alarme::NiveauMaxGros, "RAM/ALARMES/ETATS/ALR_GB_NIV_MAX");
+        publierAlarme(Alarme::NiveauMaxPetit, "RAM/ALARMES/ETATS/ALR_PB_NIV_MAX");
+        publierAlarme(Alarme::ConnexionBalance, "RAM/ALARMES/ETATS/ALR_CNX_BAL");
+        publierAlarme(Alarme::ConnexionPowerMeter, "RAM/ALARMES/ETATS/ALR_CNX_POW");
         mqtt.envoyer("RAM/PANNEAU/ETATS/TemperatureActive", resultat.temperatureActive ? "ON" : "OFF");
         mqtt.envoyer("RAM/PANNEAU/ETATS/Mode", resultat.automatique ? "AUTO" : "MANUEL");
         if (resultat.disponible)
@@ -117,10 +177,7 @@ void RunMqtt::task()
             mqtt.envoyer("RAM/PANNEAU/ETATS/ValveEF", lecture.ouvertureValve[static_cast<int>(Valve::ColdWater)]);
             mqtt.envoyer("RAM/PANNEAU/ETATS/ValveEEC", panneau.isHotWaterOn() ? "ON" : "OFF");
             mqtt.envoyer("RAM/PANNEAU/ETATS/ValveEEF", panneau.isColdWaterOn() ? "ON" : "OFF");
-            // mqtt.envoyer("RAM/POWERMETER/ETATS/Ia", lecture.courant[0]); pas vrai valeur
-            // mqtt.envoyer("RAM/POWERMETER/ETATS/Ib", lecture.courant[1]);
-            mqtt.envoyer("RAM/ALARMES/ETATS/ALR_GB_OVF", lecture.debordementGrosBassin ? "ON" : "OFF");
-            mqtt.envoyer("RAM/ALARMES/ETATS/ALR_PB_OVF", lecture.debordementPetitBassin ? "ON" : "OFF");
+
             mqtt.envoyer("RAM/PANNEAU/ETATS/Pompe", panneau.isPumpOn() ? "ON" : "OFF");
         }
 
@@ -142,7 +199,7 @@ bool RunMqtt::prendreMisesAJour(MisesAJour &valeurs)
 
 bool RunMqtt::ValeurRecue::lireConsigne(double &valeur) const
 {
-    if (!recue || !estCommande)
+    if (!recue)
         return false;
 
     const char *texte = contenu.c_str();
