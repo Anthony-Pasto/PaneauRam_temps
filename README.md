@@ -83,16 +83,16 @@ Sur le panneau physique, une liaison coupée peut empêcher les commandes de fer
 |---|---|---|
 | Création du dépôt GitHub et rédaction de la planification | 12 novembre 2026 | Planification rédigée |
 | Configuration du projet C++ sur Raspberry Pi | 19 novembre 2026 | Makefile en place |
-| Établissement de la communication avec le panneau RAM | 19 novembre 2026 | En place, validation physique à compléter |
+| Établissement de la communication avec le panneau RAM | 19 novembre 2026 | En place |
 | Lecture des capteurs de niveau et de température | 19 novembre 2026 | Implémentée |
 | Implémentation du contrôle manuel des valves et de la pompe | 19 novembre 2026 | Implémenté |
 | Implémentation du PID pour le niveau des deux bassins | 26 novembre 2026 | Implémenté |
 | Implémentation des alarmes de débordement et de niveau maximum | 26 novembre 2026 | Contacts de débordement pris en charge |
-| Implémentation des systèmes de secours et de sécurité | 26 novembre 2026 | Arrêt sur défaut série implémenté, validation physique à compléter |
-| Tests du PID, des alarmes et des systèmes de secours | 26 novembre 2026 | À faire |
+| Implémentation des systèmes de secours et de sécurité | 26 novembre 2026 | Arrêt sur défaut série implémenté |
+| Tests du PID, des alarmes et des systèmes de secours | 26 novembre 2026 | Fait |
 | Implémentation du PID de température du petit bassin | 3 décembre 2026 | Implémenté |
 | Implémentation de la communication MQTT avec le superviseur | 3 décembre 2026 | Publication et réception implémentées |
-| Synchronisation des commandes locales et distantes | 3 décembre 2026 | Implémentée, essais complets à faire |
+| Synchronisation des commandes locales et distantes | 3 décembre 2026 | Implémentée |
 | Tests complets des modes manuel et automatique | 10 décembre 2026 | À faire |
 | Validation du fonctionnement et correction des problèmes | 10 décembre 2026 | À faire |
 | Finalisation du plan d'essai et de la documentation | 10 décembre 2026 | À faire |
