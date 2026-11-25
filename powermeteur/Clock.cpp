@@ -48,7 +48,7 @@ void Clock::sleepUntilNextTic(int periodeMs) {
         prochainTic.tv_sec = prochainTic.tv_sec + 1;
     }
 
-    /* TODO 3 : dormir jusqu'à l'heure prochainTic, pas pendant une durée, avec
+    /* Dormir jusqu'à l'heure prochainTic, avec
        clock_nanosleep (man clock_nanosleep) : horloge CLOCK_MONOTONIC, flag
        TIMER_ABSTIME, dernier argument NULL. */
         clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &prochainTic, NULL);

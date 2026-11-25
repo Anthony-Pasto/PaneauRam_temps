@@ -1,64 +1,21 @@
 #pragma once
 
 #include "Thread.h"
-#include <mutex>
-#include <string>
 
 class Mqtt;
-class RunPID;
-class Panel;
+class PowerMeter;
+struct PowerMeterReading;
 
 class RunMqtt : public Thread {
 public:
-    struct ValeurRecue {
-        bool recue = false;
-        std::string contenu;
-
-        bool lireConsigne(double& valeur) const;
-    };
-
-    struct MisesAJour {
-        ValeurRecue consigneTemperature;
-        ValeurRecue temperatureActive;
-        ValeurRecue mode;
-        ValeurRecue pompe;
-        ValeurRecue valveEC;
-        ValeurRecue valveGB;
-        ValeurRecue valvePB;
-        ValeurRecue valveEF;
-        ValeurRecue valveEEC;
-        ValeurRecue consigneGros;
-        ValeurRecue consignePetit;
-        ValeurRecue valveEEF;
-        ValeurRecue nivGB;
-        ValeurRecue nivPB;
-        ValeurRecue tmpGB;
-        ValeurRecue tmpPB;
-        ValeurRecue hauterMaxGB;
-        ValeurRecue hauterMaxPB;
-        ValeurRecue tempsActiveAlarmeGB;
-        ValeurRecue tempsActiveAlarmePB;
-        ValeurRecue tempsIgnorerGB;
-        ValeurRecue tempsIgnorerPB;
-        
-    };
-
-    RunMqtt(RunPID& runPID, Mqtt& mqtt, Panel& panneau);
+    RunMqtt(Mqtt& mqtt, PowerMeter& compteur);
     ~RunMqtt() override;
-
-    void configurerConsignes(double petit, double temperature);
-    bool prendreMisesAJour(MisesAJour& valeurs);
 
 protected:
     void task() override;
 
 private:
-    RunPID& runPID;
+    void publier(const PowerMeterReading& lecture);
     Mqtt& mqtt;
-    Panel& panneau;
-    std::mutex mutexConsignes;
-    double consignePetit = 0.0;
-    double consigneTemperature = 0.0;
-    MisesAJour enAttente;
-    bool misesAJourDisponibles = false;
+    PowerMeter& compteur;
 };

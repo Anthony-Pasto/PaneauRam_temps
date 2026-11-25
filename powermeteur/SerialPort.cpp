@@ -21,7 +21,6 @@ static const int PASSAGES_MAX = 4096;
 
 // millisecondes écoulées depuis debut
 // (si l'horloge ne répond pas, le délai est considéré comme écoulé)
-// voir TP4 TODO #3 dans Clock.cpp
 static long msDepuis(const struct timespec& debut) {
     struct timespec maintenant;
     if (clock_gettime(CLOCK_MONOTONIC, &maintenant) != 0) {

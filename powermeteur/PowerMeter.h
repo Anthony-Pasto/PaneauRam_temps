@@ -43,26 +43,14 @@ private:
 
     PowerMeterReading partage;
 
-    RequeteElkor requeteActuelle;
-
-    unsigned char requete[8];
-    unsigned char reponse[9];
-
-    void construireRequete(RequeteElkor registre);
-    bool envoyerRequete();
-    bool recevoirReponse();
-    bool verifierReponse();
-
-    float convertirFloat();
-
-    void modifierPartage(float valeur);
-    void prochaineRequete();
+    const bool motsInverses;
+    bool lireRegistre(RequeteElkor registre, float& valeur);
 
 public:
 
-    PowerMeter(SerialPort& port);
-    ~PowerMeter();
+    explicit PowerMeter(SerialPort& port, bool motsInverses = false);
 
+    // Appeler depuis le thread d'acquisition. Publie un relevé complet.
     void update();
 
     PowerMeterReading getReading();
