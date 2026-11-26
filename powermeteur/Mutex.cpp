@@ -10,9 +10,11 @@ Mutex::~Mutex() {
 }
 
 void Mutex::take() {
+    /* TODO 1a : prendre le mutex avec pthread_mutex_lock (man pthread_mutex_lock). */
     pthread_mutex_lock(&mutex);
 }
 
 void Mutex::release() {
+    /* TODO 1b : rendre le mutex. La fonction est décrite dans la même page de man. */
     pthread_mutex_unlock(&mutex);
 }
