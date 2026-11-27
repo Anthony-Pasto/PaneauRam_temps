@@ -59,24 +59,12 @@ bool Balance::lireRegistre(std::array<unsigned char, 18> &trame)
 
 void Balance::update()
 {
-    PowerMeterReading lecture;
-    for (const auto &mesure : mesures)
-    {
-        if (!lireRegistre(mesure.registre, lecture.*(mesure.champ)))
-        {
-            std::lock_guard<std::mutex> verrou(mutex);
-            partage.connexion = false;
-            return;
-        }
-    }
-
-    lecture.connexion = true;
-    std::lock_guard<std::mutex> verrou(mutex);
-    partage = lecture;
+   
+   
 }
 
 PowerMeterReading Balance::getReading()
 {
-    std::lock_guard<std::mutex> verrou(mutex);
-    return partage;
+  
+    
 }

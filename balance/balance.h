@@ -33,20 +33,21 @@ private:
     const bool motsInverses;
    
 
-    bool lireRegistre(std::array<unsigned char, 18> &trame);
+    
 
 
     unsigned char trame[18];
 
 public:
 
-    explicit PowerMeter(SerialPort& port, bool motsInverses = false);
+    explicit Balance(SerialPort& port, bool motsInverses = false);
 
     // Appeler depuis le thread d'acquisition. Publie un relevé complet.
     void update();
-
+    
+bool lireRegistre(std::array<unsigned char, 18> &trame);
     PowerMeterReading getReading();
-     bool motsInverses;
+     
 };
 
 #endif
